@@ -1,0 +1,23 @@
+name: CI
+
+# 标准 GitHub Actions(若把仓库镜像到 GitHub 即生效)。
+# Gitee 用户可在 Gitee Go 配同样的 install → typecheck → lint → test → build 流水线。
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

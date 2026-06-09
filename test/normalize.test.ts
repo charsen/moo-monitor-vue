@@ -8,6 +8,20 @@ describe('toError', () => {
     expect(toError(null).message).toBeDefined()
     expect(toError(new RangeError('r'))).toBeInstanceOf(RangeError)
   })
+
+  it('uses a thrown object’s own message/name', () => {
+    const e = toError({ message: 'custom boom', name: 'ApiError' })
+    expect(e.message).toBe('custom boom')
+    expect(e.name).toBe('ApiError')
+  })
+
+  it('survives circular references without collapsing to Unknown error', () => {
+    const a: Record<string, unknown> = {}
+    a.self = a
+    const e = toError(a)
+    expect(e.message).toContain('Circular')
+    expect(e.message).not.toBe('Unknown error')
+  })
 })
 
 describe('normalize', () => {
@@ -40,5 +54,21 @@ describe('normalize', () => {
     expect(rec.payload?.tags).toEqual({ area: 'checkout' })
     expect(rec.payload?.extra).toEqual({ cartId: 'c1' })
     expect(normalize(new Error('y'), {}).payload).toBeUndefined()
+  })
+
+  it('sets first_seen (for cloud new-record first-seen)', () => {
+    expect(normalize(new Error('x'), {}).first_seen).toBeDefined()
+  })
+
+  it('normalizes volatile numbers/ids so they group together', () => {
+    const a = normalize(new Error('failed for user 123 at 0xABCD'), {})
+    const b = normalize(new Error('failed for user 456 at 0x1234'), {})
+    expect(a.hash).toBe(b.hash)
+  })
+
+  it('keeps distinct quoted property names in different groups', () => {
+    const a = normalize(new Error("Cannot read properties of undefined (reading 'id')"), {})
+    const b = normalize(new Error("Cannot read properties of undefined (reading 'name')"), {})
+    expect(a.hash).not.toBe(b.hash)
   })
 })

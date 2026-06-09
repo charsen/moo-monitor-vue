@@ -9,7 +9,7 @@
 - **四大捕获通道**(不漏报):`window.onerror`(带 `error.stack`)+ 未处理 Promise(`unhandledrejection`)+ **Vue `app.config.errorHandler`**(Vue 吞掉的渲染/生命周期错误不冒泡到 `onerror`,必须单独接)+ 资源加载错误(捕获阶段)。
 - **行为轨迹 breadcrumbs**:点击、fetch 请求自动记录(环形队列),随错误一起上报,还原「报错前发生了什么」。
 - **上下文**:`release`(版本,为日后 source map 还原预留)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
-- **可靠上报**:客户端指纹去重 + 限频(防刷屏)、`sampleRate` 采样、`ignoreErrors` 噪音过滤、批量队列、页面卸载(`pagehide`/`visibilitychange`)用 `sendBeacon` 兜底发送(失败回退 `fetch keepalive`)。
+- **可靠上报**:客户端按指纹**合并计数**(同错误累加 `count`、风暴不刷屏)、`sampleRate` 采样、`ignoreErrors` 噪音过滤、批量队列(按字节分批避开 64KB 上限)、页面卸载(`pagehide`/`visibilitychange`)用 `sendBeacon` 兜底发送(失败回退 `fetch keepalive`)。
 - **分层**:框架无关 `core` + 薄 Vue 适配层 —— `core` 可单独用于任意 JS 项目。
 
 ## 安装

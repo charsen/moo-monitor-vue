@@ -34,7 +34,6 @@ export interface FrontendErrorRecord {
     name: string
     message: string
     stack?: string
-    code?: string
     handled: boolean
     severity: string
   }

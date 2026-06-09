@@ -13,7 +13,12 @@ export const MooMonitor: Plugin = {
     const prev = app.config.errorHandler
 
     app.config.errorHandler = (err: unknown, instance: unknown, info: string) => {
-      const name = (instance as { $options?: { name?: string }; $?: { type?: { name?: string } } } | null)?.$options?.name
+      // 组件名:选项式取 $options.name;<script setup> SFC 取编译注入的 type.__name(回退 type.name)。
+      const inst = instance as {
+        $options?: { name?: string }
+        $?: { type?: { name?: string; __name?: string } }
+      } | null
+      const name = inst?.$options?.name || inst?.$?.type?.__name || inst?.$?.type?.name
       client.captureException(err, { handled: false, severity: 'error', extra: { vueInfo: info, component: name } })
       if (typeof prev === 'function') {
         prev(err, instance as never, info)

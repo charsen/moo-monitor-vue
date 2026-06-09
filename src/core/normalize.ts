@@ -3,27 +3,57 @@ import { parseStack } from './stacktrace'
 import { parseUA } from './uaParse'
 import type { Breadcrumb, FrontendErrorRecord, MooUser, StackFrame } from './types'
 
-/** 把任意抛出值规整成 Error(字符串 / 对象 / 任意值都兜底)。 */
-export function toError(input: unknown): Error {
-  if (input instanceof Error) return input
-  if (typeof input === 'string') return new Error(input)
+/** 循环引用安全的 JSON 序列化(循环处标 [Circular],绝不抛错)。 */
+function safeStringify(v: unknown): string {
+  const seen = new WeakSet<object>()
   try {
-    const msg = typeof input === 'object' && input !== null ? JSON.stringify(input) : String(input)
-    return new Error(msg)
+    return (
+      JSON.stringify(v, (_k, val) => {
+        if (typeof val === 'object' && val !== null) {
+          if (seen.has(val)) return '[Circular]'
+          seen.add(val)
+        }
+        return val
+      }) || ''
+    )
   } catch {
-    return new Error('Unknown error')
+    return ''
   }
 }
 
-/** 客户端指纹:类型 + 规整后的消息 + 栈顶 3 帧(file:function),去掉易变的数字 / 引号内容。 */
+/** 把任意抛出值规整成 Error(字符串 / 对象 / 循环引用 / 任意值都兜底,保留区分度,不全压成 'Unknown error')。 */
+export function toError(input: unknown): Error {
+  if (input instanceof Error) return input
+  if (typeof input === 'string') return new Error(input)
+  if (input && typeof input === 'object') {
+    // 很多库抛的是类 Error 对象:优先取其 message;否则安全序列化(循环引用也不丢区分度)。
+    const maybeMsg = (input as { message?: unknown }).message
+    if (typeof maybeMsg === 'string' && maybeMsg) {
+      const e = new Error(maybeMsg)
+      e.name = (input as { name?: string }).name || (input as object).constructor?.name || 'Error'
+      return e
+    }
+    return new Error(safeStringify(input) || (input as object).constructor?.name || 'Object')
+  }
+  return new Error(String(input))
+}
+
+/**
+ * 客户端指纹:类型 + 规整后的消息 + 栈顶 3 帧(file:function)。
+ * 只抹平易变部分(数字 / 十六进制地址 / 长 id / 空白),【保留】引号内的属性名等区分信息
+ * —— 否则 'reading "id"' 与 'reading "name"' 会被聚成一类(审查发现)。
+ */
 function fingerprint(name: string, message: string, frames: StackFrame[]): string {
   const top = frames
     .slice(0, 3)
     .map((f) => `${f.file || '?'}:${f.function || '?'}`)
     .join('|')
   const norm = message
+    .replace(/0x[0-9a-f]+/gi, '0xN')
+    .replace(/\b[0-9a-f]{8,}\b/gi, 'HEX')
     .replace(/\d+/g, 'N')
-    .replace(/(['"]).*?\1/g, '$1$1')
+    .replace(/\s+/g, ' ')
+    .trim()
     .slice(0, 200)
   return hash12(`${name}\n${norm}\n${top}`)
 }
@@ -57,6 +87,8 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
 
   return {
     hash: fingerprint(name, message, frames),
+    // first_seen = 本次发生时刻;云端仅在新建记录时采用(已存在记录保留其原始首见)。
+    first_seen: now,
     last_seen: now,
     count: 1,
     error: {

@@ -1,6 +1,6 @@
-/** 轻量 UA 解析:从 navigator.userAgent 取浏览器 + 版本 + 系统(够用即可,不追求全覆盖)。 */
-export function parseUA(ua: string): { browser?: string; browser_version?: string; os?: string } {
-  const res: { browser?: string; browser_version?: string; os?: string } = {}
+/** 轻量 UA 解析:从 navigator.userAgent 取浏览器 + 版本 + 系统 + 设备类型(够用即可)。 */
+export function parseUA(ua: string): { browser?: string; browser_version?: string; os?: string; device?: string } {
+  const res: { browser?: string; browser_version?: string; os?: string; device?: string } = {}
   let m: RegExpExecArray | null
 
   if ((m = /Edg(?:e|A|iOS)?\/([\d.]+)/.exec(ua))) {
@@ -20,11 +20,17 @@ export function parseUA(ua: string): { browser?: string; browser_version?: strin
     res.browser_version = m[1]
   }
 
+  // 注意顺序:iOS UA 含「like Mac OS X」,必须先判 iPhone/iPad 再判 macOS,否则被误判成 macOS。
   if (/Windows NT/.test(ua)) res.os = 'Windows'
-  else if (/Mac OS X/.test(ua)) res.os = 'macOS'
   else if (/Android/.test(ua)) res.os = 'Android'
   else if (/iPhone|iPad|iPod/.test(ua)) res.os = 'iOS'
+  else if (/Mac OS X/.test(ua)) res.os = 'macOS'
   else if (/Linux/.test(ua)) res.os = 'Linux'
+
+  // 设备类型(粗分):平板 / 手机 / 桌面 —— 填补云端 device 列(此前恒空)。
+  if (/iPad|Tablet/.test(ua)) res.device = 'Tablet'
+  else if (/Mobi|Android|iPhone|iPod/.test(ua)) res.device = 'Mobile'
+  else res.device = 'Desktop'
 
   return res
 }

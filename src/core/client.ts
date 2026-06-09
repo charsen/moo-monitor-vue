@@ -1,5 +1,4 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
-import { Deduper } from './dedupe'
 import { normalize } from './normalize'
 import { Queue } from './queue'
 import { isIgnored, shouldSample } from './sampling'
@@ -12,7 +11,6 @@ export class MooClient {
   private queue: Queue
   private crumbs: BreadcrumbBuffer
   private scope = new Scope()
-  private deduper = new Deduper()
   private installed = false
 
   constructor(options: MooOptions) {
@@ -41,7 +39,7 @@ export class MooClient {
       })
       if (isIgnored(rec.error.message, this.opts.ignoreErrors)) return
       if (!shouldSample(this.opts.sampleRate)) return
-      if (this.deduper.isDuplicate(rec.hash)) return
+      // 去重 + 计数由队列按 hash 合并完成(同指纹累加 count、不刷网络)—— 既防风暴又不丢计数。
       let out: FrontendErrorRecord | null = rec
       if (this.opts.beforeSend) out = this.opts.beforeSend(rec)
       if (!out) return
@@ -131,10 +129,12 @@ export class MooClient {
     )
 
     // fetch:记录 method/url/status 作 breadcrumb;排除上报自身 URL,防死循环。
-    if (typeof window.fetch === 'function') {
+    // 哨兵 __mooPatched 防重复 init() 叠加包裹(否则每层各记一条 breadcrumb)。
+    const f = window.fetch as (typeof window.fetch & { __mooPatched?: boolean }) | undefined
+    if (typeof f === 'function' && !f.__mooPatched) {
       const orig = window.fetch.bind(window)
       const self = this.intakeUrl
-      window.fetch = (...args: Parameters<typeof fetch>): Promise<Response> => {
+      const patched = ((...args: Parameters<typeof fetch>): Promise<Response> => {
         const input = args[0]
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request)?.url
         const method = (args[1]?.method || (input as Request)?.method || 'GET').toUpperCase()
@@ -149,7 +149,9 @@ export class MooClient {
             throw err
           },
         )
-      }
+      }) as typeof window.fetch & { __mooPatched?: boolean }
+      patched.__mooPatched = true
+      window.fetch = patched
     }
   }
 
