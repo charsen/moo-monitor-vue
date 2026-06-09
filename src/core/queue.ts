@@ -44,6 +44,10 @@ function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
 export class Queue {
   private buf: FrontendErrorRecord[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
+  // 跨 flush 去重:近期已发过的 hash(→ 发送时刻)+ TTL 内累积的记录,削减高频错误的请求数。
+  private sentAt = new Map<string, number>()
+  private carry = new Map<string, FrontendErrorRecord>()
+  private dedupeTtl = 30_000
 
   constructor(
     private url: string,
@@ -66,6 +70,18 @@ export class Queue {
       }
       return
     }
+    // 跨 flush 去重:近期(dedupeTtl 内)已发过同 hash → 累积到 carry,不立即入队;到期由 flush 补发一次。
+    const last = this.sentAt.get(record.hash)
+    if (last !== undefined && Date.now() - last < this.dedupeTtl) {
+      const c = this.carry.get(record.hash)
+      if (c) {
+        c.count = (c.count ?? 1) + (record.count ?? 1)
+        if (record.last_seen && (!c.last_seen || record.last_seen > c.last_seen)) c.last_seen = record.last_seen
+      } else {
+        this.carry.set(record.hash, record)
+      }
+      return
+    }
     this.buf.push(record)
     if (this.buf.length >= this.maxBatch) {
       this.flush()
@@ -76,22 +92,36 @@ export class Queue {
     }
   }
 
-  /** 发出队列里全部记录(按条数 + 字节双重分批)。返回是否全部成功发出。 */
-  flush(): boolean {
+  /**
+   * 发出队列里全部记录(按条数 + 字节双重分批)。useBeacon=true 用 sendBeacon(页面卸载)。
+   * 返回是否全部已派发(退避中/无通道 → false)。
+   */
+  flush(useBeacon = false): boolean {
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
     }
+    const now = Date.now()
+    // 释放到期的 carry(高频错误在 TTL 内累积,到期补发一次)。
+    for (const [hash, rec] of this.carry) {
+      if (now - (this.sentAt.get(hash) ?? 0) >= this.dedupeTtl) {
+        this.buf.push(rec)
+        this.carry.delete(hash)
+      }
+    }
     if (!this.buf.length) return true
 
     const pending = this.buf.splice(0)
+    for (const r of pending) this.sentAt.set(r.hash, now)
+    this.prune(now)
+
     let ok = true
     let batch: FrontendErrorRecord[] = []
     let size = 0
 
     const sendBatch = () => {
       if (batch.length) {
-        ok = send(this.url, this.token, batch) && ok
+        ok = send(this.url, this.token, batch, useBeacon) && ok
         batch = []
         size = 0
       }
@@ -107,6 +137,14 @@ export class Queue {
     }
     sendBatch()
     return ok
+  }
+
+  /** sentAt 表防无界增长:超阈值时清掉已过 TTL 且无 carry 的条目。 */
+  private prune(now: number): void {
+    if (this.sentAt.size < 500) return
+    for (const [h, t] of this.sentAt) {
+      if (now - t >= this.dedupeTtl && !this.carry.has(h)) this.sentAt.delete(h)
+    }
   }
 
   size(): number {

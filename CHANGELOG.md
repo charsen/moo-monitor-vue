@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.2
+
+对标 Sentry 复盘的 SDK 可靠性升级(Tier 1):
+
+- **429 / Retry-After 退避**:transport 周期发送改用可读的 fetch,命中云端限流(429)时读 `Retry-After`
+  进入退避期,期间直接丢弃不再打云端(保护入口,优于盲目重试);页面卸载仍用 `sendBeacon`。
+- **flush 不再假成功**:`flush(useBeacon)` 据派发结果返回(退避中/无通道 → false),不再恒 true。
+- **跨 flush 去重**:近期(30s TTL)已发过的同 hash 不立即重发,累积到 carry、到期补发一次,
+  削减高频错误的请求量(与单批内合并 + 云端按 hash 累计协同)。
+
 ## 0.2.1
 
 第二轮审查发现的修复:

@@ -39,7 +39,7 @@ describe('MooMonitor (Vue plugin)', () => {
 
     const client = getClient()!
     client.captureException(new Error('manual report'))
-    client.flush()
+    client.flush(true) // beacon 路径(jsdom 无 fetch)
 
     expect(beacon).toHaveBeenCalled()
   })

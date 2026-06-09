@@ -70,8 +70,8 @@ export class MooClient {
     this.crumbs.add(b)
   }
 
-  flush(): boolean {
-    return this.queue.flush()
+  flush(useBeacon = false): boolean {
+    return this.queue.flush(useBeacon)
   }
 
   // ---- 自动接管 ----
@@ -164,7 +164,8 @@ export class MooClient {
   private installFlushOnHide(): void {
     const flush = () => {
       try {
-        this.flush()
+        // 卸载时用 sendBeacon(useBeacon=true):比 fetch 更可靠地发出残余队列。
+        this.flush(true)
       } catch (e) {
         this.opts.onError?.(e)
       }

@@ -14,7 +14,7 @@ describe('MooClient auto-capture', () => {
 
     const client = new MooClient(OPTS)
     window.dispatchEvent(new ErrorEvent('error', { error: new Error('global boom'), message: 'global boom' }))
-    client.flush()
+    client.flush(true) // 用 beacon 路径(jsdom 无 fetch)
 
     expect(beacon).toHaveBeenCalled()
   })

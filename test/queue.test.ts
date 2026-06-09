@@ -47,6 +47,19 @@ describe('Queue', () => {
     expect(sent.count).toBe(2)
   })
 
+  it('suppresses cross-flush repeats of the same hash within TTL (carry → fewer requests)', () => {
+    const q = new Queue('u', 't', 999_999, 20)
+    q.add(rec('aaaaaaaaaaaa'))
+    q.flush()
+    expect(sendMock).toHaveBeenCalledTimes(1)
+
+    // flush 后再来同 hash → 进 carry,不立即入队、TTL 内不补发。
+    q.add(rec('aaaaaaaaaaaa'))
+    expect(q.size()).toBe(0)
+    q.flush()
+    expect(sendMock).toHaveBeenCalledTimes(1) // 仍 1 次
+  })
+
   it('flushes when batch hits maxBatch', () => {
     const q = new Queue('u', 't', 999_999, 2)
     q.add(rec('aaaaaaaaaaaa'))
