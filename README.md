@@ -20,6 +20,8 @@ npm i moo-monitor-vue
 
 `vue` 为 peerDependency(`^3.3`),不会重复打包。
 
+> 🚧 **尚未发布到 npm**:上面的命令暂时装不到。发布前请从 gitee 源码安装(`npm i git+https://gitee.com/charsen/moo-monitor-vue.git`),详见 **[发布前安装测试指南 → docs/local-testing.md](docs/local-testing.md)**(含云端拿 token、验证闭环、排查清单)。
+
 ## 快速开始(Vue 3)
 
 ```ts
