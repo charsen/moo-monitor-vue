@@ -35,6 +35,18 @@ describe('Queue', () => {
     expect(a.count).toBe(2)
   })
 
+  it('on merge keeps earliest first_seen and latest last_seen (order-independent)', () => {
+    const q = new Queue('u', 't', 999_999, 20)
+    q.add(rec('aaaaaaaaaaaa', 1, { first_seen: '2026-01-02T00:00:00.000Z', last_seen: '2026-01-02T00:00:00.000Z' }))
+    // 后到的一条时间更早 + 更晚的乱序:first_seen 应取最早、last_seen 取最新。
+    q.add(rec('aaaaaaaaaaaa', 1, { first_seen: '2026-01-01T00:00:00.000Z', last_seen: '2026-01-03T00:00:00.000Z' }))
+    q.flush()
+    const sent = (sendMock.mock.calls[0][2] as FrontendErrorRecord[])[0]
+    expect(sent.first_seen).toBe('2026-01-01T00:00:00.000Z')
+    expect(sent.last_seen).toBe('2026-01-03T00:00:00.000Z')
+    expect(sent.count).toBe(2)
+  })
+
   it('flushes when batch hits maxBatch', () => {
     const q = new Queue('u', 't', 999_999, 2)
     q.add(rec('aaaaaaaaaaaa'))

@@ -34,6 +34,8 @@ npm i git+https://gitee.com/charsen/moo-monitor-vue.git
 
 > 走 SSH 也行(若你配了 gitee SSH key):`npm i git+ssh://git@gitee.com/charsen/moo-monitor-vue.git`
 
+> ⚠️ 从 git 安装时会自动构建(`prepare` 跑 `vite build`,需要 devDependencies)。所以**别用 `--omit=dev` / `--production` 安装**(会因缺 vite 等构建依赖而失败)。普通 `npm i`(默认装 devDependencies)即可;若你的环境强制生产安装,改用下面的「方法二:tarball」(tarball 内已是构建好的 `dist`,安装时不再构建)。
+
 ---
 
 ## 方法二:打 tarball 再安装(最贴近"正式发布的样子")
