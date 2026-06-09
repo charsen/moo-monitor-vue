@@ -1,10 +1,12 @@
-import { send } from './transport'
+import { send, inBackoff, backoffRemaining } from './transport'
 import type { FrontendErrorRecord } from './types'
 
 // sendBeacon / fetch keepalive 的 body 上限约 64KB,留余量给 token 包裹 → 单批 ≤ 56KB。
 const MAX_BYTES = 56_000
 // 单条记录硬上限:超了就截断 stack / breadcrumbs / message,保证它能独立发出去(不被静默丢)。
 const MAX_RECORD_BYTES = 48_000
+// 缓冲上限:退避 / 积压时上限保护,防内存无界增长(超出丢弃)。
+const MAX_BUFFER = 200
 
 // 真实 UTF-8 字节数(不能用 .length —— UTF-16 码元数;中文每字 .length=1 但 UTF-8 占 3 字节,
 // 否则中文负载会把批体积严重低估,实际超 64KB → sendBeacon/keepalive 静默丢)。
@@ -80,15 +82,23 @@ export class Queue {
       } else {
         this.carry.set(record.hash, record)
       }
+      // carry 也要 arm 定时器:否则错误停止 + 无后续 add/flush 时,carry 累积的计数永远发不出去。
+      this.arm(this.dedupeTtl)
       return
     }
+    if (this.buf.length >= MAX_BUFFER) return // 积压上限保护(如长退避期):丢弃,防内存无界。
     this.buf.push(record)
     if (this.buf.length >= this.maxBatch) {
       this.flush()
       return
     }
+    this.arm(this.flushInterval)
+  }
+
+  /** 安排一次 flush(已有待触发定时器则不重复设)。 */
+  private arm(delay: number): void {
     if (!this.timer) {
-      this.timer = setTimeout(() => this.flush(), this.flushInterval)
+      this.timer = setTimeout(() => this.flush(), delay)
     }
   }
 
@@ -100,6 +110,12 @@ export class Queue {
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
+    }
+    // 退避中:绝不动 buf/carry/sentAt —— 否则记录被 splice 后随 send 一起丢失,且 sentAt 被污染会压制
+    // 同类后续错误。改为安排「退避结束后」再 flush 一次,期间记录留在 buf(有 MAX_BUFFER 上限保护)。
+    if (inBackoff()) {
+      this.timer = setTimeout(() => this.flush(), Math.max(1000, backoffRemaining() + 100))
+      return false
     }
     const now = Date.now()
     // 释放到期的 carry(高频错误在 TTL 内累积,到期补发一次)。

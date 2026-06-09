@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.3
+
+第三轮审查发现的修复(都源自 v0.2.2 新增的退避 / 跨 flush 去重):
+
+- **退避期不再丢数据**:`flush()` 原先无条件 `splice` buf + 标记 sentAt 再发,退避中 `send` 直接丢 →
+  整批永久丢失 + sentAt 污染压制同类。改为退避中**不动 buf/carry/sentAt**,安排退避结束后重试一次;
+  并加 `MAX_BUFFER` 上限防长退避期内存无界。
+- **carry 计数不再漏发**:同 hash 累积进 carry 后**也 arm 定时器**(原先只有入 buf 才 arm)→ 错误停止 +
+  无后续 add 时,carry 累积的计数也能到期被 flush 补发。
+- **error.message 出站脱敏**:此前唯独 message 没过 `scrub`(stack/url/frames/breadcrumb 都过了)→
+  消息内嵌的 token / 带密钥 URL 会明文上报。现已脱敏(指纹仍用脱敏前文本、仅本地哈希)。
+
 ## 0.2.2
 
 对标 Sentry 复盘的 SDK 可靠性升级(Tier 1):

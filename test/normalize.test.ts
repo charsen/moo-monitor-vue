@@ -87,13 +87,15 @@ describe('normalize', () => {
     expect(rec.error.stack).toBeUndefined()
   })
 
-  it('redacts secrets in stack / page / breadcrumbs before sending (defense in depth)', () => {
-    const err = new Error('boom')
+  it('redacts secrets in message / stack / page / breadcrumbs before sending (defense in depth)', () => {
+    const err = new Error('请求失败 GET http://api/x?token=msgsecret777')
     err.stack = 'Error: boom\n    at f (http://app/x.js?token=topsecret123:1:1)'
     const rec = normalize(err, {
       breadcrumbs: [{ category: 'fetch', message: 'GET http://api/u?access_token=leaked999 200' }],
     })
     const json = JSON.stringify(rec)
+    expect(rec.error.message).not.toContain('msgsecret777') // error.message 也脱敏
+    expect(json).not.toContain('msgsecret777')
     expect(json).not.toContain('topsecret123')
     expect(json).not.toContain('leaked999')
   })

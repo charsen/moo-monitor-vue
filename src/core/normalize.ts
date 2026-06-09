@@ -105,7 +105,9 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
     count: 1,
     error: {
       name,
-      message,
+      // 出站脱敏:消息本身也可能内嵌 token / 带密钥的 URL(如网络错误把 URL 拼进 message)。
+      // 指纹用脱敏前的 message(仅本地哈希、不外泄);上报字段用脱敏后的。
+      message: scrub(message) ?? message,
       stack: cleanStack,
       handled: ctx.handled ?? true,
       severity: ctx.severity ?? 'error',

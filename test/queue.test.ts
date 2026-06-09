@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Queue } from '../src/core/queue'
-import { send } from '../src/core/transport'
+import { send, inBackoff } from '../src/core/transport'
 import type { FrontendErrorRecord } from '../src/core/types'
 
-vi.mock('../src/core/transport', () => ({ send: vi.fn(() => true) }))
+vi.mock('../src/core/transport', () => ({
+  send: vi.fn(() => true),
+  inBackoff: vi.fn(() => false),
+  backoffRemaining: vi.fn(() => 0),
+}))
 const sendMock = send as unknown as ReturnType<typeof vi.fn>
+const inBackoffMock = inBackoff as unknown as ReturnType<typeof vi.fn>
 
 function rec(hash: string, count = 1, over: Partial<FrontendErrorRecord> = {}): FrontendErrorRecord {
   return {
@@ -20,7 +25,41 @@ function rec(hash: string, count = 1, over: Partial<FrontendErrorRecord> = {}): 
 }
 
 describe('Queue', () => {
-  beforeEach(() => sendMock.mockClear())
+  beforeEach(() => {
+    sendMock.mockClear()
+    inBackoffMock.mockReturnValue(false)
+  })
+
+  it('keeps the buffer intact during backoff (no data loss, no send)', () => {
+    inBackoffMock.mockReturnValue(true)
+    const q = new Queue('u', 't', 999_999, 20)
+    q.add(rec('aaaaaaaaaaaa'))
+
+    expect(q.flush()).toBe(false)
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(q.size()).toBe(1) // 记录仍在 buf,未被丢弃
+
+    inBackoffMock.mockReturnValue(false)
+    q.flush()
+    expect(sendMock).toHaveBeenCalledTimes(1) // 退避结束后正常发出
+  })
+
+  it('releases carry via its own timer when no further add (no lost counts)', () => {
+    vi.useFakeTimers()
+    try {
+      const q = new Queue('u', 't', 999_999, 20)
+      q.add(rec('aaaaaaaaaaaa'))
+      q.flush() // 发送 + 记 sentAt
+      expect(sendMock).toHaveBeenCalledTimes(1)
+
+      q.add(rec('aaaaaaaaaaaa')) // TTL 内同 hash → 进 carry,并 arm 自己的定时器
+      expect(q.size()).toBe(0)
+      vi.advanceTimersByTime(31_000) // 过 dedupeTtl → carry 定时器触发 flush → 补发
+      expect(sendMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
   it('merges same-hash records and accumulates count (SDK-side aggregation)', () => {
     const q = new Queue('u', 't', 999_999, 20)

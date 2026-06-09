@@ -6,6 +6,11 @@ export function inBackoff(): boolean {
   return Date.now() < backoffUntil
 }
 
+/** 距退避结束还有多少毫秒(用于安排退避后重试)。 */
+export function backoffRemaining(): number {
+  return Math.max(0, backoffUntil - Date.now())
+}
+
 function setBackoff(retryAfterSeconds: number): void {
   const secs = retryAfterSeconds > 0 && retryAfterSeconds < 3600 ? retryAfterSeconds : 60
   backoffUntil = Date.now() + secs * 1000
