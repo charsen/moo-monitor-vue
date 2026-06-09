@@ -1,10 +1,8 @@
 import { hash12 } from './hash'
+import { scrub } from './scrub'
 import { parseStack } from './stacktrace'
 import { parseUA } from './uaParse'
 import type { Breadcrumb, FrontendErrorRecord, MooUser, StackFrame } from './types'
-
-// SDK 自身的打包文件名 —— 用于从堆栈里剔除 SDK 内部帧(合成 Error 时栈顶会是这些)。
-const SDK_FRAME = /moo-monitor-vue/
 
 /** 循环引用安全的 JSON 序列化(循环处标 [Circular],绝不抛错)。 */
 function safeStringify(v: unknown): string {
@@ -80,20 +78,16 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
   const err = toError(input)
   const name = err.name || 'Error'
   const message = err.message || String(input)
-  // 剔除 SDK 自身内部帧:ResizeObserver / window.onerror 这类只有 message 的错误,Error 在 SDK 内 new 出来,
-  // 栈顶会是 toError/normalize 等 SDK 帧,无定位价值。
-  let frames = parseStack(err.stack).filter((f) => !SDK_FRAME.test(f.file || ''))
-  // 剥掉 SDK 帧后若没有业务帧 → 用 window.onerror 提供的 filename:line:col 补一帧。
+  // 真·Error(业务 throw)栈顶即业务位置 → 保留;SDK 合成的 Error(字符串 / 对象 / onerror 仅 message)
+  // 栈是 SDK 内部(toError/normalize…)无定位价值 → 丢弃,改用 onerror 的 filename:line:col 补帧。
+  // 判定基于 input 是否原生 Error,与打包产物无关(不靠文件名匹配 —— 生产打包后路径已不含包名)。
+  const synthetic = !(input instanceof Error)
+  // 出站脱敏:堆栈帧 file / 原始 stack 里的 URL query 可能带 token,离开浏览器前打码。
+  let frames = synthetic ? [] : parseStack(err.stack).map((f) => ({ ...f, file: scrub(f.file) }))
   if (!frames.length && ctx.location?.file && (ctx.location.line ?? 0) > 0) {
-    frames = [{ file: ctx.location.file, line: ctx.location.line, column: ctx.location.column }]
+    frames = [{ file: scrub(ctx.location.file), line: ctx.location.line, column: ctx.location.column }]
   }
-  // 原始堆栈同步剔除 SDK 行(详情「调用栈」回退展示不致误导)。
-  const cleanStack = err.stack
-    ? err.stack
-        .split('\n')
-        .filter((l) => !SDK_FRAME.test(l))
-        .join('\n') || undefined
-    : undefined
+  const cleanStack = synthetic ? undefined : scrub(err.stack)
 
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : undefined
   const uaInfo = ua ? parseUA(ua) : {}
@@ -118,12 +112,15 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
     },
     page:
       typeof location !== 'undefined'
-        ? { url: location.href, referrer: typeof document !== 'undefined' ? document.referrer || undefined : undefined }
+        ? { url: scrub(location.href), referrer: typeof document !== 'undefined' ? scrub(document.referrer) || undefined : undefined }
         : {},
     client: { user_agent: ua, ...uaInfo },
     context: { env: ctx.env, release: ctx.release, project: ctx.project ?? 'web', occurred_at: now },
     frames: frames.length ? frames : undefined,
-    breadcrumbs: ctx.breadcrumbs && ctx.breadcrumbs.length ? ctx.breadcrumbs : undefined,
+    // breadcrumb message 里常含 fetch/资源 URL(可能带 token)→ 出站脱敏。
+    breadcrumbs: ctx.breadcrumbs && ctx.breadcrumbs.length
+      ? ctx.breadcrumbs.map((b) => ({ ...b, message: scrub(b.message) }))
+      : undefined,
     user: ctx.user
       ? {
           id: ctx.user.id != null ? String(ctx.user.id) : undefined,

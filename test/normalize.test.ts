@@ -72,21 +72,29 @@ describe('normalize', () => {
     expect(a.hash).not.toBe(b.hash)
   })
 
-  it('strips SDK-internal frames but keeps app frames', () => {
+  it('keeps the real stack for genuine Error throws', () => {
     const err = new Error('boom')
-    err.stack =
-      'Error: boom\n    at toError (http://x/node_modules/.vite/deps/moo-monitor-vue_vue.js:1:1)\n    at handler (http://app/Cart.vue:42:5)'
+    err.stack = 'Error: boom\n    at handler (http://app/Cart.vue:42:5)'
     const rec = normalize(err, {})
-    expect(rec.frames?.some((f) => f.file?.includes('moo-monitor-vue'))).toBeFalsy()
     expect(rec.frames?.some((f) => f.file?.includes('Cart.vue'))).toBe(true)
-    expect(rec.error.stack).not.toContain('moo-monitor-vue')
+    expect(rec.error.stack).toContain('Cart.vue')
   })
 
-  it('falls back to onerror location frame when only SDK frames remain', () => {
-    const err = new Error('ResizeObserver loop')
-    err.stack =
-      'Error: ResizeObserver loop\n    at toError (http://x/moo-monitor-vue_vue.js:1:1)\n    at normalize (http://x/moo-monitor-vue_vue.js:2:2)'
-    const rec = normalize(err, { location: { file: 'http://app/page.js', line: 10, column: 3 } })
+  it('discards the SDK-synthesized stack for non-Error throws and uses onerror location', () => {
+    // 字符串抛值 → Error 在 SDK 内合成,栈是 SDK 内部 → 应丢弃(与打包文件名无关),用 location 补帧。
+    const rec = normalize('boom from a string throw', { location: { file: 'http://app/page.js', line: 10, column: 3 } })
     expect(rec.frames).toEqual([{ file: 'http://app/page.js', line: 10, column: 3 }])
+    expect(rec.error.stack).toBeUndefined()
+  })
+
+  it('redacts secrets in stack / page / breadcrumbs before sending (defense in depth)', () => {
+    const err = new Error('boom')
+    err.stack = 'Error: boom\n    at f (http://app/x.js?token=topsecret123:1:1)'
+    const rec = normalize(err, {
+      breadcrumbs: [{ category: 'fetch', message: 'GET http://api/u?access_token=leaked999 200' }],
+    })
+    const json = JSON.stringify(rec)
+    expect(json).not.toContain('topsecret123')
+    expect(json).not.toContain('leaked999')
   })
 })

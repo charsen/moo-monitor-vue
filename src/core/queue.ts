@@ -6,15 +6,21 @@ const MAX_BYTES = 56_000
 // 单条记录硬上限:超了就截断 stack / breadcrumbs / message,保证它能独立发出去(不被静默丢)。
 const MAX_RECORD_BYTES = 48_000
 
+// 真实 UTF-8 字节数(不能用 .length —— UTF-16 码元数;中文每字 .length=1 但 UTF-8 占 3 字节,
+// 否则中文负载会把批体积严重低估,实际超 64KB → sendBeacon/keepalive 静默丢)。
+const ENC = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null
+
 function bytes(v: unknown): number {
   try {
-    return JSON.stringify(v).length
+    const s = JSON.stringify(v)
+    return ENC ? ENC.encode(s).length : s.length * 3 // 无 TextEncoder 时按最坏 3x 估
   } catch {
     return MAX_RECORD_BYTES + 1
   }
 }
 
-/** 单条记录过大时按优先级裁剪(先砍最占体积的 stack / breadcrumbs / frames,再砍 message)。 */
+/** 单条记录过大时按优先级裁剪(先砍最占体积的 stack / breadcrumbs / frames,再砍 message),
+ *  直到落到 MAX_RECORD_BYTES 以内,保证它能独立发出去(不被静默丢)。 */
 function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
   const out: FrontendErrorRecord = { ...r, error: { ...r.error } }
   if (out.error.stack && out.error.stack.length > 4000) out.error.stack = out.error.stack.slice(0, 4000) + '…<truncated>'
@@ -23,6 +29,7 @@ function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
   if (bytes(out) > MAX_RECORD_BYTES) {
     out.breadcrumbs = undefined
     out.payload = undefined
+    out.frames = undefined // frames 也可能很大(深栈),二轮直接丢
     if (out.error.stack && out.error.stack.length > 1500) out.error.stack = out.error.stack.slice(0, 1500) + '…<truncated>'
     if (out.error.message.length > 2000) out.error.message = out.error.message.slice(0, 2000) + '…'
   }
@@ -50,7 +57,10 @@ export class Queue {
     const existing = this.buf.find((r) => r.hash === record.hash)
     if (existing) {
       existing.count = (existing.count ?? 1) + (record.count ?? 1)
-      existing.last_seen = record.last_seen ?? existing.last_seen
+      // last_seen 取「最新」、first_seen 取「最早」—— 防乱序 / beforeSend 改写时间导致回退。
+      if (record.last_seen && (!existing.last_seen || record.last_seen > existing.last_seen)) {
+        existing.last_seen = record.last_seen
+      }
       if (record.first_seen && (!existing.first_seen || record.first_seen < existing.first_seen)) {
         existing.first_seen = record.first_seen
       }

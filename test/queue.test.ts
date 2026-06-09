@@ -51,6 +51,17 @@ describe('Queue', () => {
     expect(sendMock.mock.calls.length).toBe(2) // 按字节拆成两批,避开 64KB beacon 上限
   })
 
+  it('counts real UTF-8 bytes for CJK content (not UTF-16 char length)', () => {
+    const q = new Queue('u', 't', 999_999, 1000)
+    // 每条 ~15000 个汉字:.length≈15000(旧逻辑两条 30000 < 56000 不拆),但 UTF-8 ≈45000 字节/条,
+    // 两条 ≈90000 字节 > 56000 → 必须拆成两批。
+    const cjk = '错'.repeat(15_000)
+    q.add(rec('aaaaaaaaaaaa', 1, { error: { name: 'E', message: cjk, handled: false, severity: 'error' } }))
+    q.add(rec('bbbbbbbbbbbb', 1, { error: { name: 'E', message: cjk, handled: false, severity: 'error' } }))
+    q.flush()
+    expect(sendMock.mock.calls.length).toBe(2)
+  })
+
   it('truncates a single record that exceeds the per-record cap', () => {
     const q = new Queue('u', 't', 999_999, 1000)
     const huge = 'y'.repeat(60_000)
