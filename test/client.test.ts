@@ -32,6 +32,25 @@ describe('MooClient auto-capture', () => {
     expect(window.fetch).toBe(after1) // 第二次 init 命中哨兵,不再叠加包裹
   })
 
+  it('close() restores window.fetch and stops capturing (microfrontend / repeated init)', () => {
+    const beacon = vi.fn(() => true)
+    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+    const base = vi.fn(() => Promise.resolve({ ok: true, status: 200 }))
+    // @ts-expect-error 测试注入 fetch
+    window.fetch = base
+
+    const client = new MooClient(OPTS)
+    expect(window.fetch).not.toBe(base) // 已打补丁
+
+    client.close()
+    expect(window.fetch).toBe(base) // 还原原始 fetch
+
+    beacon.mockClear()
+    client.captureException(new Error('after close')) // 关闭后 enabled=false → 不入队
+    client.flush(true)
+    expect(beacon).not.toHaveBeenCalled()
+  })
+
   it('flushes the queue on pagehide', () => {
     const beacon = vi.fn(() => true)
     Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })

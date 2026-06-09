@@ -30,6 +30,20 @@ describe('MooMonitor (Vue plugin)', () => {
     expect(prev).toHaveBeenCalledOnce()
   })
 
+  it('captures router lazy-load (chunk) failures via router.onError', () => {
+    let handler: ((e: unknown) => void) | undefined
+    const router = { onError: (h: (e: unknown) => void) => { handler = h } }
+
+    const app = createApp({ render: () => h('div') })
+    app.use(MooMonitor, { endpoint: 'https://cloud.test/api/v1', token: 'tok12345', router })
+
+    expect(typeof handler).toBe('function')
+    const client = getClient()!
+    const spy = vi.spyOn(client, 'captureException')
+    handler!(new Error('Loading chunk 5 failed'))
+    expect(spy).toHaveBeenCalledOnce()
+  })
+
   it('flush() sends queued events via beacon', () => {
     const beacon = vi.fn(() => true)
     Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })

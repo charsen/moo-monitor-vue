@@ -5,7 +5,7 @@ import type { FrontendErrorRecord } from './types'
 const MAX_BYTES = 56_000
 // 单条记录硬上限:超了就截断 stack / breadcrumbs / message,保证它能独立发出去(不被静默丢)。
 const MAX_RECORD_BYTES = 48_000
-// 缓冲上限:退避 / 积压时上限保护,防内存无界增长(超出丢弃)。
+// 缓冲上限:退避 / 积压时上限保护,防内存无界增长(超出丢弃,计入 dropped 并经 onDrop 上抛)。
 const MAX_BUFFER = 200
 
 // 真实 UTF-8 字节数(不能用 .length —— UTF-16 码元数;中文每字 .length=1 但 UTF-8 占 3 字节,
@@ -40,26 +40,27 @@ function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
 
 /**
  * 内存批量队列:满 maxBatch 或到 flushInterval 触发 flush。
- * - 按 hash 合并:同指纹在队列里累加 count(SDK 端聚合,真正成为云端累计的来源,不再恒发 1)。
+ * - 单次 flush 窗口内同 hash 合并累加 count;跨窗口由云端按 (project,hash) 累计(oldCount+delta),
+ *   不丢计数。刻意【不做】跨 flush 客户端去重(carry)—— 那套 TTL/定时器复杂度反复引入计数搁浅 /
+ *   新错误延迟等问题,而它只省「持续高频错误少发几个请求」这点边际优化,不值当。
  * - flush 按字节分批:单批 ≤ ~56KB,避开 sendBeacon/fetch keepalive 的 64KB 静默丢弃。
+ * - 退避中保留 buf 不发(不丢),退避结束后重试;缓冲到 MAX_BUFFER 才丢弃并计入 dropped。
  */
 export class Queue {
   private buf: FrontendErrorRecord[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
-  // 跨 flush 去重:近期已发过的 hash(→ 发送时刻)+ TTL 内累积的记录,削减高频错误的请求数。
-  private sentAt = new Map<string, number>()
-  private carry = new Map<string, FrontendErrorRecord>()
-  private dedupeTtl = 30_000
+  private dropped = 0
 
   constructor(
     private url: string,
     private token: string,
     private flushInterval = 5000,
     private maxBatch = 20,
+    private onDrop?: (n: number) => void,
   ) {}
 
   add(record: FrontendErrorRecord): void {
-    // 同 hash 合并:累加 count、取最新 last_seen、保留最早 first_seen —— 风暴下不刷网络且计数不丢。
+    // 同 hash 合并:累加 count、取最新 last_seen、保留最早 first_seen —— 单窗口内风暴不刷网络且计数不丢。
     const existing = this.buf.find((r) => r.hash === record.hash)
     if (existing) {
       existing.count = (existing.count ?? 1) + (record.count ?? 1)
@@ -72,21 +73,11 @@ export class Queue {
       }
       return
     }
-    // 跨 flush 去重:近期(dedupeTtl 内)已发过同 hash → 累积到 carry,不立即入队;到期由 flush 补发一次。
-    const last = this.sentAt.get(record.hash)
-    if (last !== undefined && Date.now() - last < this.dedupeTtl) {
-      const c = this.carry.get(record.hash)
-      if (c) {
-        c.count = (c.count ?? 1) + (record.count ?? 1)
-        if (record.last_seen && (!c.last_seen || record.last_seen > c.last_seen)) c.last_seen = record.last_seen
-      } else {
-        this.carry.set(record.hash, record)
-      }
-      // carry 也要 arm 定时器:否则错误停止 + 无后续 add/flush 时,carry 累积的计数永远发不出去。
-      this.arm(this.dedupeTtl)
+    if (this.buf.length >= MAX_BUFFER) {
+      // 积压上限(典型:长退避 / 长时间无网)→ 丢弃但计数,经 onDrop 让宿主可感知(非静默)。
+      this.dropped++
       return
     }
-    if (this.buf.length >= MAX_BUFFER) return // 积压上限保护(如长退避期):丢弃,防内存无界。
     this.buf.push(record)
     if (this.buf.length >= this.maxBatch) {
       this.flush()
@@ -95,42 +86,44 @@ export class Queue {
     this.arm(this.flushInterval)
   }
 
-  /** 安排一次 flush(已有待触发定时器则不重复设)。 */
+  /** 安排一次 flush(已有待触发定时器则不重复设);Node/SSR 下 unref,不拖住进程退出。 */
   private arm(delay: number): void {
-    if (!this.timer) {
-      this.timer = setTimeout(() => this.flush(), delay)
-    }
+    if (this.timer) return
+    const t = setTimeout(() => this.flush(), delay)
+    ;(t as unknown as { unref?: () => void }).unref?.()
+    this.timer = t
   }
 
   /**
    * 发出队列里全部记录(按条数 + 字节双重分批)。useBeacon=true 用 sendBeacon(页面卸载)。
-   * 返回是否全部已派发(退避中/无通道 → false)。
+   * 返回是否全部已派发(退避中 → false)。
    */
   flush(useBeacon = false): boolean {
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
     }
-    // 退避中:绝不动 buf/carry/sentAt —— 否则记录被 splice 后随 send 一起丢失,且 sentAt 被污染会压制
-    // 同类后续错误。改为安排「退避结束后」再 flush 一次,期间记录留在 buf(有 MAX_BUFFER 上限保护)。
+    // 退避中:绝不动 buf —— 否则记录被 splice 后随 send 一起丢失。安排「退避结束后」再 flush;
+    // 期间记录留在 buf(有 MAX_BUFFER 上限保护)。
     if (inBackoff()) {
-      this.timer = setTimeout(() => this.flush(), Math.max(1000, backoffRemaining() + 100))
+      const t = setTimeout(() => this.flush(), Math.max(1000, backoffRemaining() + 100))
+      ;(t as unknown as { unref?: () => void }).unref?.()
+      this.timer = t
       return false
     }
-    const now = Date.now()
-    // 释放到期的 carry(高频错误在 TTL 内累积,到期补发一次)。
-    for (const [hash, rec] of this.carry) {
-      if (now - (this.sentAt.get(hash) ?? 0) >= this.dedupeTtl) {
-        this.buf.push(rec)
-        this.carry.delete(hash)
+    // 积压丢弃回执:本轮真正发送前,把累计丢弃量经 onDrop 上抛(让宿主可感知,非静默)。
+    if (this.dropped > 0) {
+      const n = this.dropped
+      this.dropped = 0
+      try {
+        this.onDrop?.(n)
+      } catch {
+        /* onDrop 不能反过来冲垮 flush */
       }
     }
     if (!this.buf.length) return true
 
     const pending = this.buf.splice(0)
-    for (const r of pending) this.sentAt.set(r.hash, now)
-    this.prune(now)
-
     let ok = true
     let batch: FrontendErrorRecord[] = []
     let size = 0
@@ -153,14 +146,6 @@ export class Queue {
     }
     sendBatch()
     return ok
-  }
-
-  /** sentAt 表防无界增长:超阈值时清掉已过 TTL 且无 carry 的条目。 */
-  private prune(now: number): void {
-    if (this.sentAt.size < 500) return
-    for (const [h, t] of this.sentAt) {
-      if (now - t >= this.dedupeTtl && !this.carry.has(h)) this.sentAt.delete(h)
-    }
   }
 
   size(): number {

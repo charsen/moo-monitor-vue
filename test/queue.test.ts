@@ -44,21 +44,25 @@ describe('Queue', () => {
     expect(sendMock).toHaveBeenCalledTimes(1) // 退避结束后正常发出
   })
 
-  it('releases carry via its own timer when no further add (no lost counts)', () => {
-    vi.useFakeTimers()
-    try {
-      const q = new Queue('u', 't', 999_999, 20)
-      q.add(rec('aaaaaaaaaaaa'))
-      q.flush() // 发送 + 记 sentAt
-      expect(sendMock).toHaveBeenCalledTimes(1)
+  it('counts dropped records on buffer overflow and reports them via onDrop (no silent loss)', () => {
+    inBackoffMock.mockReturnValue(true) // 退避中:buf 不发,持续累积直到上限
+    let dropped = 0
+    const q = new Queue('u', 't', 999_999, 999_999, (n) => (dropped += n))
+    for (let i = 0; i < 250; i++) q.add(rec('h' + String(i).padStart(11, '0'))) // > MAX_BUFFER(200)
+    expect(q.size()).toBe(200) // buf 封顶
+    inBackoffMock.mockReturnValue(false)
+    q.flush()
+    expect(dropped).toBe(50) // 50 条被丢弃且经 onDrop 上抛(可感知,非静默)
+  })
 
-      q.add(rec('aaaaaaaaaaaa')) // TTL 内同 hash → 进 carry,并 arm 自己的定时器
-      expect(q.size()).toBe(0)
-      vi.advanceTimersByTime(31_000) // 过 dedupeTtl → carry 定时器触发 flush → 补发
-      expect(sendMock).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
+  it('re-sends cross-flush repeats (no client dedupe; cloud accumulates by hash)', () => {
+    const q = new Queue('u', 't', 999_999, 20)
+    q.add(rec('aaaaaaaaaaaa'))
+    q.flush()
+    q.add(rec('aaaaaaaaaaaa')) // flush 之后的同 hash:直接入队,下次 flush 照常发(云端累计)
+    expect(q.size()).toBe(1)
+    q.flush()
+    expect(sendMock).toHaveBeenCalledTimes(2)
   })
 
   it('merges same-hash records and accumulates count (SDK-side aggregation)', () => {
@@ -84,19 +88,6 @@ describe('Queue', () => {
     expect(sent.first_seen).toBe('2026-01-01T00:00:00.000Z')
     expect(sent.last_seen).toBe('2026-01-03T00:00:00.000Z')
     expect(sent.count).toBe(2)
-  })
-
-  it('suppresses cross-flush repeats of the same hash within TTL (carry → fewer requests)', () => {
-    const q = new Queue('u', 't', 999_999, 20)
-    q.add(rec('aaaaaaaaaaaa'))
-    q.flush()
-    expect(sendMock).toHaveBeenCalledTimes(1)
-
-    // flush 后再来同 hash → 进 carry,不立即入队、TTL 内不补发。
-    q.add(rec('aaaaaaaaaaaa'))
-    expect(q.size()).toBe(0)
-    q.flush()
-    expect(sendMock).toHaveBeenCalledTimes(1) // 仍 1 次
   })
 
   it('flushes when batch hits maxBatch', () => {

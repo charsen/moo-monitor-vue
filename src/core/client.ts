@@ -5,6 +5,8 @@ import { isIgnored, shouldSample } from './sampling'
 import { Scope } from './scope'
 import { resolveOptions, type Breadcrumb, type CaptureHint, type FrontendErrorRecord, type MooOptions, type MooUser, type ResolvedOptions } from './types'
 
+type AnyFetch = typeof fetch & { __mooPatched?: boolean }
+
 export class MooClient {
   private opts: ResolvedOptions
   private intakeUrl: string
@@ -12,11 +14,21 @@ export class MooClient {
   private crumbs: BreadcrumbBuffer
   private scope = new Scope()
   private installed = false
+  // 监听器 / 补丁引用 —— 供 close() 解绑还原(否则重复 init / 微前端会泄漏监听器 + 重复上报)。
+  private onErrorEvt?: EventListener
+  private onRejection?: EventListener
+  private onClick?: EventListener
+  private onVisibility?: () => void
+  private onPagehide?: () => void
+  private origFetch?: typeof fetch
+  private patchedFetch?: AnyFetch
 
   constructor(options: MooOptions) {
     this.opts = resolveOptions(options)
     this.intakeUrl = this.opts.endpoint.replace(/\/+$/, '') + '/frontend-errors/intake'
-    this.queue = new Queue(this.intakeUrl, this.opts.token, this.opts.flushInterval, this.opts.maxBatch)
+    this.queue = new Queue(this.intakeUrl, this.opts.token, this.opts.flushInterval, this.opts.maxBatch, (n) =>
+      this.opts.onError?.(new Error(`moo-monitor-vue: dropped ${n} records (buffer full / backoff)`)),
+    )
     this.crumbs = new BreadcrumbBuffer(this.opts.maxBreadcrumbs)
     if (this.opts.enabled && typeof window !== 'undefined') this.install()
   }
@@ -40,7 +52,7 @@ export class MooClient {
       })
       if (isIgnored(rec.error.message, this.opts.ignoreErrors)) return
       if (!shouldSample(this.opts.sampleRate)) return
-      // 去重 + 计数由队列按 hash 合并完成(同指纹累加 count、不刷网络)—— 既防风暴又不丢计数。
+      // 计数由队列在单次 flush 窗口内按 hash 合并、跨窗口由云端累计(不丢计数,也不做易出 bug 的客户端跨窗去重)。
       let out: FrontendErrorRecord | null = rec
       if (this.opts.beforeSend) out = this.opts.beforeSend(rec)
       if (!out) return
@@ -74,6 +86,23 @@ export class MooClient {
     return this.queue.flush(useBeacon)
   }
 
+  /** 解绑全部监听器 + 还原 fetch + flush 残余队列 —— 重复 init / 微前端卸载时调用,防泄漏与重复上报。 */
+  close(): boolean {
+    const ok = this.flush(true)
+    if (typeof window !== 'undefined') {
+      if (this.onErrorEvt) window.removeEventListener('error', this.onErrorEvt, true)
+      if (this.onRejection) window.removeEventListener('unhandledrejection', this.onRejection)
+      if (this.onClick) window.removeEventListener('click', this.onClick, true)
+      if (this.onVisibility) window.removeEventListener('visibilitychange', this.onVisibility)
+      if (this.onPagehide) window.removeEventListener('pagehide', this.onPagehide)
+      // 仅当当前 fetch 仍是本实例打的补丁时才还原(别覆盖他人后续的补丁)。
+      if (this.origFetch && (window.fetch as AnyFetch) === this.patchedFetch) window.fetch = this.origFetch
+    }
+    this.installed = false
+    this.opts.enabled = false // 关闭后不再捕获
+    return ok
+  }
+
   // ---- 自动接管 ----
 
   private install(): void {
@@ -90,55 +119,52 @@ export class MooClient {
 
   private installGlobalHandlers(): void {
     // 捕获阶段(true):既接 JS 运行时错误,也接资源加载错误(后者不冒泡,只能在捕获阶段拿)。
-    window.addEventListener(
-      'error',
-      (event: Event) => {
-        const target = event.target as (HTMLElement & { src?: string; href?: string }) | null
-        if (target && target !== (window as unknown as EventTarget) && target.tagName && (target.src || target.href)) {
-          const url = target.src || target.href
-          this.addBreadcrumb({ category: 'resource', level: 'error', message: `资源加载失败: ${target.tagName} ${url}` })
-          this.captureException(new Error(`Resource failed to load: ${url}`), {
-            handled: false,
-            severity: 'warning',
-            extra: { tag: target.tagName },
-          })
-          return
-        }
-        const e = event as ErrorEvent
-        // 无原生 Error 对象(只有 message,如 ResizeObserver)时,带上事件的 filename:line:col 作定位帧。
-        this.captureException(e.error || e.message || 'Unknown error', {
+    this.onErrorEvt = (event: Event) => {
+      const target = event.target as (HTMLElement & { src?: string; href?: string }) | null
+      if (target && target !== (window as unknown as EventTarget) && target.tagName && (target.src || target.href)) {
+        const url = target.src || target.href
+        this.addBreadcrumb({ category: 'resource', level: 'error', message: `资源加载失败: ${target.tagName} ${url}` })
+        this.captureException(new Error(`Resource failed to load: ${url}`), {
           handled: false,
-          severity: 'error',
-          location: e.error ? undefined : { file: e.filename, line: e.lineno, column: e.colno },
+          severity: 'warning',
+          extra: { tag: target.tagName },
         })
-      },
-      true,
-    )
+        return
+      }
+      const e = event as ErrorEvent
+      // 无原生 Error 对象(只有 message,如 ResizeObserver)时,带上事件的 filename:line:col 作定位帧。
+      this.captureException(e.error || e.message || 'Unknown error', {
+        handled: false,
+        severity: 'error',
+        location: e.error ? undefined : { file: e.filename, line: e.lineno, column: e.colno },
+      })
+    }
+    window.addEventListener('error', this.onErrorEvt, true)
 
-    window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
-      this.captureException(event.reason ?? 'Unhandled promise rejection', { handled: false, severity: 'error' })
-    })
+    this.onRejection = (event: Event) => {
+      const reason = (event as PromiseRejectionEvent).reason
+      this.captureException(reason ?? 'Unhandled promise rejection', { handled: false, severity: 'error' })
+    }
+    window.addEventListener('unhandledrejection', this.onRejection)
   }
 
   private installBreadcrumbs(): void {
-    // 点击:记录可读选择器(tag#id.class),不存 DOM。
-    window.addEventListener(
-      'click',
-      (e: Event) => {
-        const t = e.target as Element | null
-        if (!t || !t.tagName) return
-        const cls = typeof t.className === 'string' && t.className ? '.' + t.className.trim().split(/\s+/).join('.') : ''
-        const sel = (t.tagName.toLowerCase() + (t.id ? '#' + t.id : '') + cls).slice(0, 100)
-        this.addBreadcrumb({ category: 'click', message: sel })
-      },
-      true,
-    )
+    // 点击:记录可读选择器(tag#id.class),不存 DOM。className 在 SVG 上是 SVGAnimatedString,非 string → 跳过。
+    this.onClick = (e: Event) => {
+      const t = e.target as Element | null
+      if (!t || !t.tagName) return
+      const cls = typeof t.className === 'string' && t.className ? '.' + t.className.trim().split(/\s+/).join('.') : ''
+      const sel = (t.tagName.toLowerCase() + (t.id ? '#' + t.id : '') + cls).slice(0, 100)
+      this.addBreadcrumb({ category: 'click', message: sel })
+    }
+    window.addEventListener('click', this.onClick, true)
 
     // fetch:记录 method/url/status 作 breadcrumb;排除上报自身 URL,防死循环。
     // 哨兵 __mooPatched 防重复 init() 叠加包裹(否则每层各记一条 breadcrumb)。
-    const f = window.fetch as (typeof window.fetch & { __mooPatched?: boolean }) | undefined
+    const f = window.fetch as AnyFetch | undefined
     if (typeof f === 'function' && !f.__mooPatched) {
-      const orig = window.fetch.bind(window)
+      this.origFetch = window.fetch // 原始引用(close 时按引用还原)
+      const orig = this.origFetch.bind(window) // 调用时绑定 window(否则部分浏览器 Illegal invocation)
       const self = this.intakeUrl
       const patched = ((...args: Parameters<typeof fetch>): Promise<Response> => {
         const input = args[0]
@@ -155,8 +181,9 @@ export class MooClient {
             throw err
           },
         )
-      }) as typeof window.fetch & { __mooPatched?: boolean }
+      }) as AnyFetch
       patched.__mooPatched = true
+      this.patchedFetch = patched
       window.fetch = patched
     }
   }
@@ -171,10 +198,12 @@ export class MooClient {
       }
     }
     // visibilitychange(hidden)+ pagehide 比已废弃的 unload 更可靠;beacon 在此仍能发出残余队列。
-    window.addEventListener('visibilitychange', () => {
+    this.onVisibility = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flush()
-    })
-    window.addEventListener('pagehide', flush)
+    }
+    this.onPagehide = flush
+    window.addEventListener('visibilitychange', this.onVisibility)
+    window.addEventListener('pagehide', this.onPagehide)
   }
 }
 
@@ -183,6 +212,8 @@ export class MooClient {
 let _client: MooClient | null = null
 
 export function init(options: MooOptions): MooClient {
+  // 重复 init(微前端 / HMR):先关掉旧实例,解绑其监听器 + 还原 fetch,防泄漏与重复上报。
+  _client?.close()
   _client = new MooClient(options)
   return _client
 }
@@ -197,4 +228,5 @@ export const setUser = (u: MooUser | null): void => _client?.setUser(u)
 export const setTag = (k: string, v: string): void => _client?.setTag(k, v)
 export const setExtra = (k: string, v: unknown): void => _client?.setExtra(k, v)
 export const addBreadcrumb = (b: Breadcrumb): void => _client?.addBreadcrumb(b)
-export const flush = (): boolean => _client?.flush() ?? false
+export const flush = (useBeacon?: boolean): boolean => _client?.flush(useBeacon) ?? false
+export const close = (): boolean => _client?.close() ?? false

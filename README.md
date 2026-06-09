@@ -27,6 +27,7 @@ npm i moo-monitor-vue
 ```ts
 import { createApp } from 'vue'
 import App from './App.vue'
+import router from './router'
 import MooMonitor from 'moo-monitor-vue/vue'
 
 const app = createApp(App)
@@ -38,13 +39,16 @@ app.use(MooMonitor, {
   release: __APP_VERSION__,                     // 版本号(建议注入 build 时的版本/commit)
   sampleRate: 1,
   ignoreErrors: ['ResizeObserver loop', /^Script error\.?$/],
+  router,                                       // 可选:传入 Vue Router → 捕获懒加载 chunk 失败(发版后旧 chunk 404)
   // beforeSend: (e) => (e.error.message.includes('secret') ? null : e),
 })
 
 app.mount('#app')
 ```
 
-装上后,Vue 组件错误、全局 JS 错误、未处理 Promise、资源加载失败都会自动上报。
+装上后,Vue 组件错误、全局 JS 错误、未处理 Promise、资源加载失败都会自动上报。传入 `router` 还会捕获「Loading chunk failed / 动态 import 失败」(这类不进 errorHandler / window.onerror)。
+
+> **微前端 / HMR**:重复 `init()` 会自动关掉旧实例(解绑监听器 + 还原 `fetch`);也可手动 `import { close } from 'moo-monitor-vue'` 调 `close()` 卸载。**SSR/Nuxt**:服务端只暴露命令式 API,不接管浏览器侧捕获(服务端错误交给后端监控)。
 
 ## 命令式 API
 

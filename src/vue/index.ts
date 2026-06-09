@@ -18,5 +18,6 @@ export {
   setExtra,
   addBreadcrumb,
   flush,
+  close,
 } from '../core/client'
-export { MooMonitor, MooMonitor as default } from './plugin'
+export { MooMonitor, MooMonitor as default, type VuePluginOptions } from './plugin'

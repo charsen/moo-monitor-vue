@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.4
+
+第四轮审查:**砍掉 carry(跨 flush 去重)** + 集成健壮性。
+
+- **移除跨 flush 去重(carry)**:它自 v0.2.2 引入后反复出 bug(计数搁浅、压制新错误 flush 延迟 ~6×、
+  内存无界、与采样交互失真)。改回「单 flush 窗口内按 hash 合并、跨窗口由云端按 (project,hash) 累计」——
+  更简单且**不丢计数**,只放弃「持续高频错误少发几个请求」这点边际优化。
+- **积压丢弃可感知**:缓冲到 `MAX_BUFFER` 才丢弃,且累计 `dropped` 经 `onError` 回调上抛(不再静默吞错)。
+- **Vue Router chunk 失败捕获**:插件新增 `router` 选项,接 `router.onError` 捕获「Loading chunk failed /
+  动态 import 失败」(发版后旧 chunk 404 常见,这类不进 errorHandler / window.onerror)。
+- **`close()` / 重复 init 不泄漏**:新增 `client.close()`(解绑监听器 + 还原 `fetch` + flush 残余);
+  重复 `init()` 自动先关旧实例。微前端 / HMR 友好。
+- **SSR 安全**:Vue 插件在无 `window`(服务端)时只 init 命令式 API,不接管 errorHandler / 路由。
+- **定时器 `unref`**:Node / SSR 下不拖住进程退出。
+
 ## 0.2.3
 
 第三轮审查发现的修复(都源自 v0.2.2 新增的退避 / 跨 flush 去重):
