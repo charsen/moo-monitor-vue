@@ -101,6 +101,41 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 - **配额**:免费档每项目只保留**最新 30 条**前端错误(VIP 不限);高基数错误(大量不同指纹)会快速 churn —— 善用 `ignoreErrors` + `sampleRate` + 云端「忽略/静音」收敛。
 - **CORS**:云端对 `/api/v1/*` 放行任意 origin 的 `POST`,但**只允许 `Content-Type` / `Accept` 头**。SDK 因此把 token 放在请求体、不加任何自定义头;**请勿**给 SDK 加自定义请求头(会触发预检失败)。
 
+## 采集范围(采什么 / 不采什么)
+
+这是个**前端异常监控**:只采集「错误」类事件 + 出错现场的环境与行为轨迹,**不**采集正常业务数据、性能指标或录屏。
+
+**捕获来源(5 类,都是错误):**
+
+1. 未捕获的 JS 运行时错误 —— `window.onerror`(带堆栈)
+2. 未处理的 Promise 拒绝 —— `unhandledrejection`
+3. Vue 组件错误 —— `app.config.errorHandler`(渲染/生命周期/watch,这些不冒泡到 `onerror`,故单独接)
+4. 资源加载失败 —— 捕获阶段 error 事件(img/script/css 404 等,记为 `warning`)
+5. 手动上报 —— `captureException(e)` / `captureMessage('…')`
+
+> 不会上报:正常接口请求、性能指标(FCP/LCP…)、用户行为本身、页面录屏 —— 均不在 v1 范围(见[路线图](#路线图))。
+
+**每条错误携带的信息:**
+
+| 类别 | 字段 |
+| --- | --- |
+| 错误本身 | 类型(`TypeError`…)、消息、堆栈、是否主动捕获(`handled`)、严重度 |
+| 解析后调用栈 | `frames`(文件 / 行 / 列 / 函数名) |
+| 页面 | 出错页面 URL、referrer |
+| 浏览器 / 设备 | UA、浏览器 + 版本、系统、设备类型(Mobile/Tablet/Desktop) |
+| 上下文 | 环境 `env`、版本 `release`、来源 `project`、发生时间 |
+| 行为轨迹 `breadcrumbs` | 报错前的**点击**与 **fetch 请求**(method/url/status,环形队列约 30 条) |
+| 用户 | `id` / `name` / `session_id`(需调 `setUser(...)` 注入,否则没有) |
+| 自定义 | `tags` / `extra`(`captureException(e, { tags, extra })` 传入) |
+| 聚合 | 指纹 `hash`、出现次数 `count`、首次 / 最近时间 |
+
+**隐私与边界:**
+
+- **breadcrumbs 里的 fetch 是「轨迹」不是「上报」**:平时不单独发,只在真出错时随错误一起带上;只记 url/method/status,**不抓请求 / 响应体**。
+- **不发 cookie / 凭证**(`credentials: 'omit'`);token 放请求体。
+- **脱敏**:消息 / 堆栈 / 页面 URL 里像密钥的内容(`token=…`、JWT、`Bearer …`)在**云端读取时**统一打码(展示 / 通知 / 复制给 AI 都不外泄)。
+- **聚合而非逐条风暴**:同一错误按指纹合并、累加 `count`、批量发送。
+
 ## 上报数据形态
 
 每条错误以 `{ token, records: [ ... ] }` POST 到 `/frontend-errors/intake`,record 形如:
