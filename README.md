@@ -83,7 +83,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `enabled` | `true` | 总开关 |
 | `autoCapture` | `true` | 自动捕获全局/Promise/资源错误 |
 | `autoBreadcrumbs` | `true` | 自动记录点击 / fetch 轨迹 |
-| `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则) |
+| `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |
 
 ## 云端准备

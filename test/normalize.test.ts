@@ -71,4 +71,22 @@ describe('normalize', () => {
     const b = normalize(new Error("Cannot read properties of undefined (reading 'name')"), {})
     expect(a.hash).not.toBe(b.hash)
   })
+
+  it('strips SDK-internal frames but keeps app frames', () => {
+    const err = new Error('boom')
+    err.stack =
+      'Error: boom\n    at toError (http://x/node_modules/.vite/deps/moo-monitor-vue_vue.js:1:1)\n    at handler (http://app/Cart.vue:42:5)'
+    const rec = normalize(err, {})
+    expect(rec.frames?.some((f) => f.file?.includes('moo-monitor-vue'))).toBeFalsy()
+    expect(rec.frames?.some((f) => f.file?.includes('Cart.vue'))).toBe(true)
+    expect(rec.error.stack).not.toContain('moo-monitor-vue')
+  })
+
+  it('falls back to onerror location frame when only SDK frames remain', () => {
+    const err = new Error('ResizeObserver loop')
+    err.stack =
+      'Error: ResizeObserver loop\n    at toError (http://x/moo-monitor-vue_vue.js:1:1)\n    at normalize (http://x/moo-monitor-vue_vue.js:2:2)'
+    const rec = normalize(err, { location: { file: 'http://app/page.js', line: 10, column: 3 } })
+    expect(rec.frames).toEqual([{ file: 'http://app/page.js', line: 10, column: 3 }])
+  })
 })

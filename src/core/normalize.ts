@@ -3,6 +3,9 @@ import { parseStack } from './stacktrace'
 import { parseUA } from './uaParse'
 import type { Breadcrumb, FrontendErrorRecord, MooUser, StackFrame } from './types'
 
+// SDK 自身的打包文件名 —— 用于从堆栈里剔除 SDK 内部帧(合成 Error 时栈顶会是这些)。
+const SDK_FRAME = /moo-monitor-vue/
+
 /** 循环引用安全的 JSON 序列化(循环处标 [Circular],绝不抛错)。 */
 function safeStringify(v: unknown): string {
   const seen = new WeakSet<object>()
@@ -68,14 +71,29 @@ export interface NormalizeCtx {
   breadcrumbs?: Breadcrumb[]
   handled?: boolean
   severity?: string
+  /** window.onerror 提供的出错位置(无原生 Error 对象时用来补一帧)。 */
+  location?: { file?: string; line?: number; column?: number }
 }
 
 /** Error/任意值 → 上报记录(嵌套结构匹配云端 intake)。 */
 export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecord {
   const err = toError(input)
-  const frames = parseStack(err.stack)
   const name = err.name || 'Error'
   const message = err.message || String(input)
+  // 剔除 SDK 自身内部帧:ResizeObserver / window.onerror 这类只有 message 的错误,Error 在 SDK 内 new 出来,
+  // 栈顶会是 toError/normalize 等 SDK 帧,无定位价值。
+  let frames = parseStack(err.stack).filter((f) => !SDK_FRAME.test(f.file || ''))
+  // 剥掉 SDK 帧后若没有业务帧 → 用 window.onerror 提供的 filename:line:col 补一帧。
+  if (!frames.length && ctx.location?.file && (ctx.location.line ?? 0) > 0) {
+    frames = [{ file: ctx.location.file, line: ctx.location.line, column: ctx.location.column }]
+  }
+  // 原始堆栈同步剔除 SDK 行(详情「调用栈」回退展示不致误导)。
+  const cleanStack = err.stack
+    ? err.stack
+        .split('\n')
+        .filter((l) => !SDK_FRAME.test(l))
+        .join('\n') || undefined
+    : undefined
 
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : undefined
   const uaInfo = ua ? parseUA(ua) : {}
@@ -94,7 +112,7 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
     error: {
       name,
       message,
-      stack: err.stack,
+      stack: cleanStack,
       handled: ctx.handled ?? true,
       severity: ctx.severity ?? 'error',
     },

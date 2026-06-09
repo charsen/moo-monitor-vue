@@ -36,6 +36,7 @@ export class MooClient {
         breadcrumbs: this.crumbs.all(),
         handled: hint.handled ?? true,
         severity: hint.severity,
+        location: hint.location,
       })
       if (isIgnored(rec.error.message, this.opts.ignoreErrors)) return
       if (!shouldSample(this.opts.sampleRate)) return
@@ -104,7 +105,12 @@ export class MooClient {
           return
         }
         const e = event as ErrorEvent
-        this.captureException(e.error || e.message || 'Unknown error', { handled: false, severity: 'error' })
+        // 无原生 Error 对象(只有 message,如 ResizeObserver)时,带上事件的 filename:line:col 作定位帧。
+        this.captureException(e.error || e.message || 'Unknown error', {
+          handled: false,
+          severity: 'error',
+          location: e.error ? undefined : { file: e.filename, line: e.lineno, column: e.colno },
+        })
       },
       true,
     )

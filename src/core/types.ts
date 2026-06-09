@@ -58,6 +58,8 @@ export interface CaptureHint {
   /** 是否「已捕获」(主动 captureException = true;全局兜底 = false)。 */
   handled?: boolean
   severity?: string
+  /** 出错位置(window.onerror 无原生 Error 对象时用来补一帧)。 */
+  location?: { file?: string; line?: number; column?: number }
 }
 
 export interface MooOptions {
