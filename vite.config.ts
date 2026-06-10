@@ -9,12 +9,14 @@ export default defineConfig({
       entry: {
         index: 'src/index.ts',
         vue: 'src/vue/index.ts',
+        vite: 'src/vite/index.ts', // 构建期 sourcemap 上传插件(Node 侧)
       },
       formats: ['es', 'cjs'],
       fileName: (format, name) => `${name}.${format === 'es' ? 'js' : 'cjs'}`,
     },
     rollupOptions: {
-      external: ['vue'],
+      // vite 入口跑在 Node(构建期):node:* 内置模块与 vite 本身都不打进包。
+      external: ['vue', 'vite', /^node:/],
       // exports:'named' —— vue 适配层同时有命名导出 + default(插件对象);消除混用警告,
       // cjs 使用方以 require('.../vue').default 取插件,named API 直接解构。
       output: { globals: { vue: 'Vue' }, exports: 'named' },

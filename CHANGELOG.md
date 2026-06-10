@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+**sourcemap 还原(VIP)**:新增 `moo-monitor-vue/vite` 构建插件,与云端还原管线配套。
+
+- **Vite 插件 `mooSourcemapUpload`**:构建结束自动收集产物 `.map` 上传到云端
+  `/api/v1/sourcemaps/intake`(multipart,分批 ≤20 文件/请求);选项 `include` /
+  `deleteAfterUpload`(上传后删 `.map`,不随站点发布)/ `failOnError`(默认失败只告警、
+  不挡构建;403 非 VIP、网络错均放行)/ `silent`。Node 18+ 全局 fetch/FormData,零新依赖。
+- **凭证隔离**:上传须用单独签发的「`sourcemaps` 能力」CI token —— 浏览器里的
+  `frontend_errors` token 是公开的,云端直接拒绝(无该能力 403)。
+- **云端配套**(moo-scaffold-cloud):零依赖流式 Source Map v3 解析(单遍 VLQ,大 map 不爆内存)、
+  按 (project, release, 产物名) 覆盖式登记、每项目滚动保留 20 个 release、错误先到 map 后到自动重算;
+  还原结果进 详情调用栈 /「复制给 AI 修复」/ 列表出错组件摘要。
+- 浏览器 SDK 本体**无行为变化**(`release` 字段早已上报);新 entry 仅构建期使用,不进浏览器包。
+- 文档:README「sourcemap 还原(VIP)」+ `docs/sourcemaps.md`(接入清单 / 配额 / 排查表)。
+
 ## 0.2.4
 
 第四轮审查:**砍掉 carry(跨 flush 去重)** + 集成健壮性。

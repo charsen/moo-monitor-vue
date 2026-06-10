@@ -8,7 +8,8 @@
 
 - **四大捕获通道**(不漏报):`window.onerror`(带 `error.stack`)+ 未处理 Promise(`unhandledrejection`)+ **Vue `app.config.errorHandler`**(Vue 吞掉的渲染/生命周期错误不冒泡到 `onerror`,必须单独接)+ 资源加载错误(捕获阶段)。
 - **行为轨迹 breadcrumbs**:点击、fetch 请求自动记录(环形队列),随错误一起上报,还原「报错前发生了什么」。
-- **上下文**:`release`(版本,为日后 source map 还原预留)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
+- **上下文**:`release`(版本,sourcemap 还原的匹配键)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
+- **sourcemap 还原(VIP)**:配套 Vite 插件构建后自动上传 `.map`,云端把压缩堆栈还原成源码位置(`.vue` 文件即出错组件),见 [sourcemap 还原](#sourcemap-还原vip)。
 - **可靠上报**:客户端按指纹**合并计数**(同错误累加 `count`、风暴不刷屏)、`sampleRate` 采样、`ignoreErrors` 噪音过滤、批量队列(按字节分批避开 64KB 上限)、页面卸载(`pagehide`/`visibilitychange`)用 `sendBeacon` 兜底发送(失败回退 `fetch keepalive`)。
 - **分层**:框架无关 `core` + 薄 Vue 适配层 —— `core` 可单独用于任意 JS 项目。
 
@@ -158,6 +159,51 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 }
 ```
 
+## sourcemap 还原(VIP)
+
+生产构建是压缩过的,堆栈里只有 `index-abc123.js:1:23456` 这类位置。把构建产物的 `.map` 上传到云端后,
+错误详情的调用栈会还原成 `src/components/Foo.vue:42:10 render` —— `.vue` 文件即出错组件;
+「复制给 AI 修复」的 markdown 与列表摘要也会用还原后的源码位置。**VIP 专享**(按项目拥有者的会员判定)。
+
+**1)云端生成上传 token**:`/app → 接入 Token → 生成`,**只勾「Sourcemap 上传」**。
+这枚 token 是 CI 密钥 —— 绝不能复用 SDK init 那枚 `frontend_errors` token(它在浏览器 JS 里人人可见,
+复用等于任何人都能往你的项目灌/覆盖 map)。
+
+**2)Vite 插件**(推荐,vite.config.ts):
+
+```ts
+import { mooSourcemapUpload } from 'moo-monitor-vue/vite'
+
+export default defineConfig({
+  build: { sourcemap: 'hidden' }, // 生成 .map 但产物 JS 里不留指向注释
+  plugins: [
+    vue(),
+    mooSourcemapUpload({
+      endpoint: 'https://cloud.example.com/api/v1',     // 与 SDK init 相同
+      token: process.env.MOO_SOURCEMAP_TOKEN!,          // CI 环境变量注入,勿入仓库
+      release: process.env.APP_VERSION!,                // 必须与 SDK init 的 release 完全一致
+      deleteAfterUpload: true,                          // 上传后从产物目录删 .map,不随站点发布
+    }),
+  ],
+})
+```
+
+插件选项:`include`(默认 `/\.js\.map$/`)、`deleteAfterUpload`(默认 `false`,生产建议 `true`)、
+`failOnError`(默认 `false`:上传失败只告警不挡构建)、`silent`。
+
+**3)或裸 API**(非 Vite 项目,CI 里 curl):
+
+```bash
+curl -X POST https://cloud.example.com/api/v1/sourcemaps/intake \
+  -F "token=$MOO_SOURCEMAP_TOKEN" -F "release=$APP_VERSION" \
+  -F "files[]=@dist/assets/index-abc123.js.map"
+```
+
+要点:**release 三处一致**(SDK init / 插件 / 实际部署的构建);匹配按「产物文件 basename」;
+每项目滚动保留最近 20 个 release(单文件 ≤ 20MB、单 release ≤ 50MB);错误先到、map 后上传也行,
+云端会对该 release 重新还原。已传的 map 在 `/app → 设置 → Sourcemap` 查看 / 删除。
+详细排查见 **[docs/sourcemaps.md](docs/sourcemaps.md)**。
+
 ## 开发
 
 ```bash
@@ -169,7 +215,7 @@ npm run build      # vite library 构建 → dist/(esm + cjs + d.ts)
 
 ## 路线图
 
-- [ ] source map 上传 + 云端还原(SDK 已带 `release`,先打通采集)
+- [x] sourcemap 上传 + 云端还原(v0.3.0:Vite 插件 + 云端流式解析,VIP)
 - [ ] localStorage 持久离线队列 + 在线重放
 - [ ] 性能 / Web Vitals(与异常监控正交)
 - [ ] 按域名白名单的公共上报公钥

@@ -1,6 +1,6 @@
 {
   "name": "moo-monitor-vue",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "轻量 Vue 3 前端异常监控 SDK —— 捕获浏览器 JS 错误并上报到 Moo Scaffold Cloud。",
   "type": "module",
   "license": "MIT",
@@ -32,6 +32,11 @@
       "import": "./dist/vue.js",
       "require": "./dist/vue.cjs"
     },
+    "./vite": {
+      "types": "./dist/vite/index.d.ts",
+      "import": "./dist/vite.js",
+      "require": "./dist/vite.cjs"
+    },
     "./package.json": "./package.json"
   },
   "sideEffects": false,
@@ -61,6 +66,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.14.0",
+    "@types/node": "^25.9.2",
     "@vue/test-utils": "^2.4.6",
     "eslint": "^9.14.0",
     "jsdom": "^25.0.1",
