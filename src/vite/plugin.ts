@@ -65,6 +65,19 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       let uploaded = 0
       let unchanged = 0
       let fileErrors = 0
+      let sentFiles = 0
+      type IntakeBody = { saved?: number; skipped?: number; errors?: Record<string, string>; error?: string; message?: string } | null
+      const postChunk = async (form: FormData) => {
+        const res = await fetch(url, { method: 'POST', body: form })
+        const body = (await res.json().catch(() => null)) as IntakeBody
+        return { res, body }
+      }
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+      // 中途失败时给出半传摘要:release 只传了一部分也是种状态,不能只留一句裸告警。
+      const abort = (reason: string) => {
+        fail(`${reason}(已传 ${sentFiles}/${names.length} 个文件,release ${opts.release} 处于部分上传状态,重跑构建可补齐)`)
+      }
+
       for (let i = 0; i < names.length; i += MAX_FILES_PER_REQUEST) {
         const chunk = names.slice(i, i + MAX_FILES_PER_REQUEST)
         const form = new FormData()
@@ -76,28 +89,31 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
           form.append('files[]', new Blob([buf], { type: 'application/json' }), basename(name))
         }
 
-        let res: Response
+        let outcome: { res: Response; body: IntakeBody }
         try {
-          res = await fetch(url, { method: 'POST', body: form })
+          outcome = await postChunk(form)
+          if (outcome.res.status === 429) {
+            // 撞云端限流:等 2s 重试一次(CI 里多 chunk 连发偶发),再失败才放弃。
+            await sleep(2000)
+            outcome = await postChunk(form)
+          }
         } catch (e) {
-          fail(`上传请求失败(网络/地址问题):${e instanceof Error ? e.message : String(e)}`)
+          abort(`上传请求失败(网络/地址问题):${e instanceof Error ? e.message : String(e)}`)
           return
         }
-        const body = (await res.json().catch(() => null)) as {
-          saved?: number
-          skipped?: number
-          errors?: Record<string, string>
-          error?: string
-        } | null
+        const { res, body } = outcome
+        // Laravel 框架级错误(429 限流/异常页)的提示在 message 字段,业务错误在 error 字段 —— 都认。
+        const errText = body?.error || body?.message
 
         if (res.status === 403 && body?.error === 'vip_required') {
           fail('sourcemap 还原为 VIP 功能 —— 请项目拥有者开通会员后再传(本次构建不受影响)。')
           return
         }
         if (!res.ok) {
-          fail(`上传失败:HTTP ${res.status}${body?.error ? ` — ${body.error}` : ''}`)
+          abort(`上传失败:HTTP ${res.status}${errText ? ` — ${errText}` : ''}`)
           return
         }
+        sentFiles += chunk.length
         uploaded += body?.saved ?? 0
         unchanged += body?.skipped ?? 0
         for (const [file, reason] of Object.entries(body?.errors ?? {})) {

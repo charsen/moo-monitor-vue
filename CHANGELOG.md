@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.5
+
+第八轮对抗审查 —— 修复 6 个问题:
+
+1. **缓冲满丢「最新」留「最旧」**:长退避/断网后保住的是 200 条最旧记录,当前正在发生的
+   反而被丢 —— 改为挤掉最旧、收下最新(丢弃仍经 onDrop 可感知)。
+2. **超大记录截断兜不住且照发**:page.url/referrer(超长 query/OAuth state)不在裁剪
+   范围;两轮截断后仍超限的记录原样发出,卸载路径被 beacon 64KB 静默吃掉。
+   url/referrer 纳入一轮裁剪(2048,与云端同口径);仍超限 → 丢弃计数,不再装作发了。
+3. **hash 路由零导航轨迹**:createWebHashHistory 的跳转只改 location.hash,
+   路径计算不含 hash → to===from 全部被吞。路径纳入 hash。
+4. **breadcrumb message 无界**:fetch('data:…巨串') / 超长 query 的单条 crumb 数十 KB,
+   把每条记录顶到截断线(届时整组轨迹被丢)。入队即钳 300(fetch 折叠路径同步钳)。
+5. **Vite 插件失败处理**:429 等 2s 重试一次;错误信息兼容 Laravel 框架级 message 字段
+   (此前 429/异常页只打出裸 "HTTP 429");中途失败给出「已传 N/共 M,release 部分上传,
+   重跑构建可补齐」摘要,不再一句裸告警就半途而废。
+6. **无列号匿名帧解析成垃圾**:"at file:line"(无列号)落进 native 兜底,整个 URL 被当成
+   函数名、file 丢失,污染指纹。新增 CHROME_NOCOL 模式正确解析。
+
+- 测试 +7,102 passed。
+
 ## 0.3.4
 
 第七轮对抗审查 —— 修复 6 个问题:

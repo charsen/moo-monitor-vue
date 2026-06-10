@@ -28,6 +28,9 @@ function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
   if (out.error.stack && out.error.stack.length > 4000) out.error.stack = out.error.stack.slice(0, 4000) + '…<truncated>'
   if (out.breadcrumbs && out.breadcrumbs.length > 10) out.breadcrumbs = out.breadcrumbs.slice(-10)
   if (out.frames && out.frames.length > 20) out.frames = out.frames.slice(0, 20)
+  // page.url/referrer 此前不在裁剪范围:超长 query / OAuth state 能把记录顶爆。与云端同口径 2048。
+  if (out.page?.url && out.page.url.length > 2048) out.page = { ...out.page, url: out.page.url.slice(0, 2048) }
+  if (out.page?.referrer && out.page.referrer.length > 2048) out.page = { ...out.page, referrer: out.page.referrer.slice(0, 2048) }
   if (bytes(out) > MAX_RECORD_BYTES) {
     out.breadcrumbs = undefined
     out.payload = undefined
@@ -86,9 +89,10 @@ export class Queue {
       return
     }
     if (this.buf.length >= MAX_BUFFER) {
-      // 积压上限(典型:长退避 / 长时间无网)→ 丢弃但计数,经 onDrop 让宿主可感知(非静默)。
+      // 积压上限(典型:长退避 / 长时间无网):挤掉【最旧】、收下最新 —— 旧记录的现场早已过期,
+      // 当前正在发生的才要紧;丢弃计数经 onDrop 上抛(非静默)。此前是反着的:留最旧丢最新。
+      this.buf.shift()
       this.dropped++
-      return
     }
     this.buf.push(record)
     if (this.buf.length >= this.maxBatch) {
@@ -162,6 +166,12 @@ export class Queue {
     for (let rec of pending) {
       if (bytes(rec) > MAX_RECORD_BYTES) rec = truncateRecord(rec)
       const b = bytes(rec)
+      // 两轮截断后仍超限(如 beforeSend 注入巨型字段):丢弃并计数 —— 发出去也会在
+      // 卸载路径被 beacon 的 64KB 上限静默吃掉,「可感知地丢」好过「装作发了」。
+      if (b > MAX_RECORD_BYTES) {
+        this.dropped++
+        continue
+      }
       // 装不下当前批(条数或字节)→ 先发出已攒的,再开新批。
       if (batch.length && (batch.length >= this.maxBatch || size + b > MAX_BYTES)) sendBatch()
       batch.push(rec)

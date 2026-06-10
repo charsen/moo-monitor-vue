@@ -7,7 +7,11 @@ export class BreadcrumbBuffer {
   constructor(private max = 30) {}
 
   add(b: Breadcrumb): void {
-    this.items.push({ timestamp: Date.now(), ...b })
+    const item = { timestamp: Date.now(), ...b }
+    // message 钳制:fetch('data:…巨串') / 超长 query 会让单条 crumb 数十 KB,
+    // 把每条错误记录顶到截断线 —— 届时整组 breadcrumbs 被丢,不如此处先截。
+    if (item.message && item.message.length > 300) item.message = item.message.slice(0, 300) + '…'
+    this.items.push(item)
     if (this.items.length > this.max) this.items.shift()
   }
 

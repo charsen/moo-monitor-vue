@@ -274,9 +274,12 @@ export class MooClient {
     const h = window.history as History | undefined
     if (!h || typeof h.pushState !== 'function') return
 
-    this.lastPath = location.pathname + location.search
+    // 路径含 hash:hash 路由(createWebHashHistory)的跳转只改 location.hash,
+    // 不带它的话 to===from,整个 hash 模式应用一条导航轨迹都记不到。
+    const cur = () => location.pathname + location.search + location.hash
+    this.lastPath = cur()
     const record = (from: string) => {
-      const to = location.pathname + location.search
+      const to = cur()
       if (to !== from) {
         this.lastPath = to
         this.addBreadcrumb({ category: 'navigation', message: `${from} → ${to}` })
@@ -289,7 +292,7 @@ export class MooClient {
       this.origReplaceState = h.replaceState
       const wrap = (orig: History['pushState']): History['pushState'] => {
         const fn = function (this: History, ...args: Parameters<History['pushState']>) {
-          const from = location.pathname + location.search
+          const from = cur()
           const ret = orig.apply(this, args)
           record(from) // record 是箭头函数,this 已绑定客户端实例
           return ret
@@ -310,6 +313,7 @@ export class MooClient {
    * 「… ×N」并刷新时间;中间插入过其他轨迹(点击/路由等)则正常另起一条,保持时序不乱。
    */
   private fetchCrumb(key: string, level: Breadcrumb['level']): void {
+    if (key.length > 280) key = key.slice(0, 280) + '…' // data: 巨串 URL;折叠路径直接改写 message,须在此截
     const last = this.crumbs.last()
     if (this.lastFetch?.key === key && last && last.category === 'fetch') {
       this.lastFetch.n++

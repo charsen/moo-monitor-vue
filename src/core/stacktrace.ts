@@ -4,6 +4,9 @@ import type { StackFrame } from './types'
 const CHROME = /^\s*at (?:(.+?)\s+\()?(.+?):(\d+):(\d+)\)?\s*$/
 // Firefox / Safari:  "fn@file:line:col"  或  "@file:line:col"
 const FIREFOX = /^\s*(.*?)@(.+?):(\d+):(\d+)\s*$/
+// 无列号变体("at file:line" / "at fn (file:line)"):此前落进 native 兜底,
+// 整个 URL 被当成函数名、file 丢失 —— 产出垃圾帧且污染指纹。
+const CHROME_NOCOL = /^\s*at (?:(.+?)\s+\()?(.+?):(\d+)\)?\s*$/
 
 /** 把 error.stack 字符串解析成结构化帧;解析不出来就返回空数组(不抛错)。 */
 export function parseStack(stack?: string, limit = 30): StackFrame[] {
@@ -27,6 +30,8 @@ export function parseStack(stack?: string, limit = 30): StackFrame[] {
       out.push({ function: m[1] || '?', file: m[2], line: Number(m[3]), column: Number(m[4]) })
     } else if ((m = FIREFOX.exec(line))) {
       out.push({ function: m[1] || '?', file: m[2], line: Number(m[3]), column: Number(m[4]) })
+    } else if ((m = CHROME_NOCOL.exec(line))) {
+      out.push({ function: m[1] || '?', file: m[2], line: Number(m[3]) })
     } else if (line.startsWith('at ')) {
       // native / anonymous(无 file:line:col),如 "at fn (native)":保留函数名,不静默丢帧。
       out.push({ function: line.slice(3).replace(/\s*\(.*\)\s*$/, '').trim() || '?', file: 'native' })
