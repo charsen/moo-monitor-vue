@@ -196,7 +196,12 @@ export default defineConfig({
 ```
 
 插件选项:`include`(默认 `/\.js\.map$/`)、`deleteAfterUpload`(默认 `false`,生产建议 `true`)、
-`failOnError`(默认 `false`:上传失败只告警不挡构建)、`silent`。
+`failOnError`(默认 `false`:上传失败只告警不挡构建)、`injectDebugIds`(默认 `true`,见下)、`silent`。
+
+**Debug ID(v0.3.7+,默认开启)**:插件给每个 bundle 注入唯一 ID(写进产物与 map),错误帧
+携带 ID 上报,云端**优先按 ID 匹配** —— 产物与 map 内容级强绑定,与 release / 文件名 / 部署路径
+解耦;传错构建批次会显式匹配失败而非错位还原。匹配链:`debug_id → (release, 文件名) → 文件名
+项目内唯一回退`。因此 **release 三处一致从「硬约束」降级为「建议」**(老 SDK / curl 上传仍依赖它)。
 
 **3)或裸 API**(非 Vite 项目,CI 里 curl):
 
@@ -206,7 +211,7 @@ curl -X POST https://cloud.example.com/api/v1/sourcemaps/intake \
   -F "files[]=@dist/assets/index-abc123.js.map"
 ```
 
-要点:**release 三处一致**(SDK init / 插件 / 实际部署的构建);匹配按「产物文件 basename」;
+要点:用插件 + SDK ≥0.3.7 时按 Debug ID 自动匹配(release 仅作展示);老接入按「release + 产物文件 basename」匹配,需**三处一致**;
 每项目滚动保留最近 20 个 release(单文件 ≤ 20MB、单 release ≤ 50MB);错误先到、map 后上传也行,
 云端会对该 release 重新还原。已传的 map 在 `/app → 设置 → Sourcemap` 查看 / 删除。
 详细排查见 **[docs/sourcemaps.md](docs/sourcemaps.md)**。

@@ -19,6 +19,8 @@ export interface StackFrame {
   line?: number
   column?: number
   function?: string
+  /** 构建插件注入的 Debug ID(云端优先按它匹配 sourcemap,与 release/文件名解耦)。 */
+  debug_id?: string
 }
 
 /**

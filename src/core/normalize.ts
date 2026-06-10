@@ -1,3 +1,4 @@
+import { debugIdForFile } from './debugIds'
 import { hash12 } from './hash'
 import { scrub } from './scrub'
 import { parseStack } from './stacktrace'
@@ -94,9 +95,12 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
   // 判定基于 input 是否原生 Error,与打包产物无关(不靠文件名匹配 —— 生产打包后路径已不含包名)。
   const synthetic = !(input instanceof Error)
   // 出站脱敏:堆栈帧 file / 原始 stack 里的 URL query 可能带 token,离开浏览器前打码。
-  let frames = synthetic ? [] : parseStack(err.stack).map((f) => ({ ...f, file: scrub(f.file) }))
+  // debug_id 用【脱敏前】的原始 file 匹配注册表(注册表键也是原始加载 URL)。
+  let frames = synthetic
+    ? []
+    : parseStack(err.stack).map((f) => ({ ...f, file: scrub(f.file), debug_id: debugIdForFile(f.file) }))
   if (!frames.length && ctx.location?.file && (ctx.location.line ?? 0) > 0) {
-    frames = [{ file: scrub(ctx.location.file), line: ctx.location.line, column: ctx.location.column }]
+    frames = [{ file: scrub(ctx.location.file), line: ctx.location.line, column: ctx.location.column, debug_id: debugIdForFile(ctx.location.file) }]
   }
   const cleanStack = synthetic ? undefined : scrub(err.stack)
 

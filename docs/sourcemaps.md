@@ -10,10 +10,13 @@ CI 构建(vite build, sourcemap: 'hidden')
        └─ POST /api/v1/sourcemaps/intake(multipart:token + release + files[])
             └─ 云端落私有盘 + 登记 release_artifacts(按 project+release+产物名 覆盖式 upsert)
 
-浏览器报错 → SDK 上报 frames(压缩位置 file:line:column)+ release
-  └─ 云端 intake 后异步任务(或打开详情时兜底)按
-       「帧文件 basename == 工件 file_name && release 完全一致」
-     找到 map → 流式 VLQ 解析 → 还原成源码 file:line:column(+ 函数名)
+浏览器报错 → SDK 上报 frames(压缩位置 file:line:column + debug_id)+ release
+  └─ 云端 intake 后异步任务(或打开详情时兜底)按【三级匹配链】找 map:
+       ① debug_id 直查(插件注入,内容级强绑定,与 release/文件名/路径解耦)
+       ② (release, 产物 basename) 精确(老 SDK / 未注入 ID 的 map)
+       ③ basename 项目内唯一回退(Vite 产物名自带内容 hash,release 配错也能救;
+          同名不同内容绝不瞎猜)
+     → 流式 VLQ 解析 → 还原成源码 file:line:column(+ 函数名)
        └─ 还原位置之外,再从 map 内嵌的 sourcesContent 抽出错行 ±3 行源码
           (前 5 个还原帧,逐行截断 + 密钥脱敏后才入库)
   └─ 生效处:详情抽屉「调用栈」(每帧可展开源码、出错行高亮)/
@@ -49,7 +52,7 @@ CI 构建(vite build, sourcemap: 'hidden')
 
 | 症状 | 排查 |
 | --- | --- |
-| 详情里还是压缩位置 | ① release 是否三处一致(错误详情「上下文」里的 release vs Sourcemap 页的分组名);② 帧文件名(如 `index-abc123.js`)在该 release 分组下是否有同名工件;③ 部署的构建和上传 map 的构建是否同一次(文件名 hash 对不上就是两次构建) |
+| 详情里还是压缩位置 | ⓪ 插件与 SDK 是否都 ≥0.3.7(Debug ID 自动匹配,基本免排查);老接入:① release 是否三处一致(错误详情「上下文」里的 release vs Sourcemap 页的分组名);② 帧文件名(如 `index-abc123.js`)在该 release 分组下是否有同名工件;③ 部署的构建和上传 map 的构建是否同一次(文件名 hash 对不上就是两次构建) |
 | 插件日志「未发现 .map 产物」 | `build.sourcemap` 没开;设 `'hidden'` 或 `true` |
 | 403 `vip_required` | 项目拥有者不是 VIP;开通后重传 |
 | 403(无 vip 字样) | token 没有 `sourcemaps` 能力,或已吊销/过期 |

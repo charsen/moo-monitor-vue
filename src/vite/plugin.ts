@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { Plugin } from 'vite'
@@ -20,6 +21,12 @@ export interface SourcemapUploadOptions {
   include?: RegExp
   /** 上传成功后从产物目录删除 .map(不随站点发布、不泄源码),默认 false;生产建议 true */
   deleteAfterUpload?: boolean
+  /**
+   * 给每个 bundle 注入 Debug ID(默认 true):产物与 map 内容级强绑定,云端按 ID 匹配,
+   * 不再依赖「release 三处一致」与文件名 —— 传错批次会显式匹配失败而非错位还原。
+   * 需 SDK ≥0.3.7(帧上报携带 debug_id)+ 云端配套;关掉则退回 release+文件名匹配。
+   */
+  injectDebugIds?: boolean
   /** 上传失败时让构建失败,默认 false(只告警,不挡发布) */
   failOnError?: boolean
   /** 静默成功日志(告警仍输出),默认 false */
@@ -28,6 +35,42 @@ export interface SourcemapUploadOptions {
 
 /** 单次请求最多文件数(与云端上限对齐,留余量)。 */
 const MAX_FILES_PER_REQUEST = 20
+
+/** js 内容 sha256 → 确定性 uuid 形态的 debug id(同一构建产物永远同 ID,watch 重跑不漂移)。 */
+function deriveDebugId(jsContent: string): string {
+  const h = createHash('sha256').update(jsContent).digest('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`
+}
+
+/**
+ * 给一对 (js, map) 注入 Debug ID:
+ *  - js 头部加一行注册 snippet(运行时以 new Error().stack 为键存 ID —— 栈里带着该 chunk
+ *    被浏览器实际加载的 URL,SDK 据此建 file→id 映射,与部署路径/文件名解耦);
+ *  - map.mappings 前补一个 ';'(补偿头部新增的一行,否则全部行号偏移 1);
+ *  - js 尾部加 //# debugId= 注释(置于 sourceMappingURL 注释之前)+ map 写 debug_id 字段。
+ * 幂等:map 已有 debug_id 则跳过(watch 增量场景)。返回是否实际注入。
+ */
+async function injectDebugId(dir: string, mapName: string): Promise<boolean> {
+  const jsPath = join(dir, mapName.replace(/\.map$/, ''))
+  const mapPath = join(dir, mapName)
+  const [js, mapRaw] = await Promise.all([readFile(jsPath, 'utf8'), readFile(mapPath, 'utf8')])
+  const map = JSON.parse(mapRaw) as { debug_id?: string; mappings?: string }
+  if (map.debug_id) return false
+
+  const id = deriveDebugId(js)
+  map.debug_id = id
+  map.mappings = ';' + (map.mappings || '')
+
+  const snippet = `;!function(){try{var e=new Error().stack;e&&(window._mooDebugIds=window._mooDebugIds||{},window._mooDebugIds[e]="${id}")}catch(r){}}();\n`
+  const idComment = `//# debugId=${id}`
+  let out = snippet + js
+  out = out.includes('//# sourceMappingURL=')
+    ? out.replace('//# sourceMappingURL=', `${idComment}\n//# sourceMappingURL=`)
+    : out + (out.endsWith('\n') ? '' : '\n') + idComment + '\n'
+
+  await Promise.all([writeFile(jsPath, out), writeFile(mapPath, JSON.stringify(map))])
+  return true
+}
 
 export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
   const include = opts.include ?? /\.js\.map$/
@@ -66,6 +109,19 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       if (names.length === 0) {
         fail("未发现 .map 产物 —— 请确认 build.sourcemap 已开启(推荐 'hidden':生成 map 但产物里不留指向注释)。")
         return
+      }
+
+      // Debug ID 注入(上传前):产物与 map 内容级强绑定,云端优先按 ID 匹配。
+      if (opts.injectDebugIds !== false) {
+        let injected = 0
+        for (const mapName of names) {
+          try {
+            injected += (await injectDebugId(dir, mapName)) ? 1 : 0
+          } catch (e) {
+            warn(`debug id 注入失败(${mapName}):${e instanceof Error ? e.message : String(e)} —— 该文件退回文件名匹配。`)
+          }
+        }
+        if (injected > 0) log(`已为 ${injected} 个 bundle 注入 debug id。`)
       }
 
       const url = opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/intake'

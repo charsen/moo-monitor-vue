@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.7
+
+**Debug ID 全链路(对标 Sentry)+ 文件名唯一回退** —— sourcemap 匹配不再依赖「release 三处一致」。
+
+- **Vite 插件注入(默认开,`injectDebugIds: false` 可关)**:上传前给每个 bundle 注入
+  确定性 Debug ID(js 内容 sha256 派生,watch 重跑不漂移)——
+  js 头部一行注册 snippet(以 `new Error().stack` 为键存 ID,栈里带着 chunk 被浏览器
+  实际加载的 URL)+ `//# debugId=` 注释(置于 sourceMappingURL 前);
+  map 写 `debug_id` 字段,`mappings` 前补 `;` 补偿行偏移。幂等(watch 增量跳过)。
+- **SDK 运行时**:懒解析 `window._mooDebugIds` 注册表(键数变化时重建,兼容懒加载 chunk),
+  栈帧携带 `debug_id` 上报(用脱敏前的原始 URL 匹配)。
+- **云端配套(需同步部署)**:`release_artifacts.debug_id` 列;三级匹配链
+  `debug_id → (release, basename) → basename 项目内唯一回退`(同名不同内容绝不瞎猜);
+  还原不再硬依赖 release;派发条件改「项目有任何工件」。
+- 效果:**release 三处一致从硬约束降级为建议**;传错构建批次显式匹配失败而非错位还原;
+  同名 chunk / CDN 改路径 / 灰度多版本混跑全部免疫。老 SDK / curl 上传完全兼容(走 ②③)。
+- 测试:SDK +2(注入幂等确定性 / 注册表→帧),111 passed;云端 +4(三级链各路径),303 passed。
+
 ## 0.3.6
 
 第九轮对抗审查 —— 修复 6 个问题:
