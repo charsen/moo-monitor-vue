@@ -3,7 +3,21 @@ export function parseUA(ua: string): { browser?: string; browser_version?: strin
   const res: { browser?: string; browser_version?: string; os?: string; device?: string } = {}
   let m: RegExpExecArray | null
 
-  if ((m = /Edg(?:e|A|iOS)?\/([\d.]+)/.exec(ua))) {
+  // 国产内嵌/套壳浏览器先判:它们的 UA 都带 Chrome/,放后面全被识别成 Chrome ——
+  // 而国内产品的错误大户恰恰是微信/钉钉内嵌页,浏览器分布会完全失真。
+  if ((m = /MicroMessenger\/([\d.]+)/.exec(ua))) {
+    res.browser = 'WeChat'
+    res.browser_version = m[1]
+  } else if ((m = /DingTalk\/([\d.]+)/.exec(ua))) {
+    res.browser = 'DingTalk'
+    res.browser_version = m[1]
+  } else if ((m = /M?QQBrowser\/([\d.]+)/.exec(ua))) {
+    res.browser = 'QQBrowser'
+    res.browser_version = m[1]
+  } else if ((m = /UCBrowser\/([\d.]+)/.exec(ua))) {
+    res.browser = 'UCBrowser'
+    res.browser_version = m[1]
+  } else if ((m = /Edg(?:e|A|iOS)?\/([\d.]+)/.exec(ua))) {
     res.browser = 'Edge'
     res.browser_version = m[1]
   } else if ((m = /OPR\/([\d.]+)/.exec(ua)) || (m = /Opera[/ ]([\d.]+)/.exec(ua))) {

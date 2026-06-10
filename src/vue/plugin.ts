@@ -30,7 +30,9 @@ export const MooMonitor: Plugin = {
     const mark = (err: unknown) => {
       if (err && typeof err === 'object') {
         try {
-          ;(err as Record<string, unknown>).__mooSeen = true
+          // 不可枚举:对非 Error 抛掷物(throw {code:403}),普通赋值会被 toError 的
+          // safeStringify 序列化进上报消息与两端指纹 —— 内部标记绝不能泄漏到数据里。
+          Object.defineProperty(err, '__mooSeen', { value: true, configurable: true })
         } catch {
           /* frozen 对象打不上标:最坏退回双计,不能因此抛错 */
         }

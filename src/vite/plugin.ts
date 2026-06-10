@@ -1,4 +1,4 @@
-import { readFile, unlink } from 'node:fs/promises'
+import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { Plugin } from 'vite'
 
@@ -41,10 +41,17 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
     warn(m)
   }
 
+  // build.sourcemap 的最终取值(configResolved 里拿):true 时产物 JS 带指向注释,
+  // deleteAfterUpload 删 map 后须把注释一并剥掉,否则全量访客的 devtools 每 chunk 一个 404。
+  let sourcemapSetting: boolean | 'inline' | 'hidden' | undefined
+
   return {
     name: 'moo-monitor-vue:sourcemap-upload',
     apply: 'build',
     enforce: 'post',
+    configResolved(config) {
+      sourcemapSetting = config.build?.sourcemap as boolean | 'inline' | 'hidden' | undefined
+    },
     async writeBundle(output, bundle) {
       if (!opts.endpoint || !opts.token || !opts.release) {
         fail('endpoint / token / release 均必填,已跳过 sourcemap 上传。')
@@ -126,11 +133,30 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       if (fileErrors > 0 && opts.failOnError) {
         throw new Error(`[moo-sourcemap] ${fileErrors} 个文件被云端拒绝(原因见上方告警)。`)
       }
+      if (opts.deleteAfterUpload && fileErrors > 0) {
+        // 有文件被拒时跳过删除要说清:用户明确要求不发布 .map,静默保留等于背着他发布了源码。
+        warn(`${fileErrors} 个文件被云端拒绝 → 本次未删除任何 .map(产物目录里仍有源码,修复后重跑构建)。`)
+      }
       if (opts.deleteAfterUpload && fileErrors === 0) {
         for (const name of names) {
           await unlink(join(dir, name)).catch(() => {})
+          // sourcemap:true 时产物 JS 尾部留着 //# sourceMappingURL= 注释,map 删了注释还在
+          // → 每个开 devtools 的访客每 chunk 一个 404。剥掉注释(等效 'hidden')。
+          if (sourcemapSetting === true) {
+            const jsPath = join(dir, name.replace(/\.map$/, ''))
+            try {
+              const code = await readFile(jsPath, 'utf8')
+              const stripped = code.replace(/\n?\/\/# sourceMappingURL=[^\n]*\s*$/, '\n')
+              if (stripped !== code) await writeFile(jsPath, stripped)
+            } catch {
+              /* 对应 JS 不在(异名/已被其他插件处理):跳过即可 */
+            }
+          }
         }
-        log(`已从产物目录删除 ${names.length} 个 .map(不随站点发布)。`)
+        log(
+          `已从产物目录删除 ${names.length} 个 .map(不随站点发布)。` +
+            (sourcemapSetting === true ? '已同步剥离 JS 尾部的 sourceMappingURL 注释(建议直接配 sourcemap:"hidden")。' : ''),
+        )
       }
     },
   }

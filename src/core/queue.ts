@@ -31,10 +31,14 @@ function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
   // page.url/referrer 此前不在裁剪范围:超长 query / OAuth state 能把记录顶爆。与云端同口径 2048。
   if (out.page?.url && out.page.url.length > 2048) out.page = { ...out.page, url: out.page.url.slice(0, 2048) }
   if (out.page?.referrer && out.page.referrer.length > 2048) out.page = { ...out.page, referrer: out.page.referrer.slice(0, 2048) }
+  // 二轮分级丢弃:先只丢 payload(超大 tags/extra 是最常见肇事者)—— 够了就保住
+  // frames/breadcrumbs;仍超限才连坐(此前一刀全丢,一个大 extra 赔上整个栈和轨迹)。
+  if (bytes(out) > MAX_RECORD_BYTES) {
+    out.payload = undefined
+  }
   if (bytes(out) > MAX_RECORD_BYTES) {
     out.breadcrumbs = undefined
-    out.payload = undefined
-    out.frames = undefined // frames 也可能很大(深栈),二轮直接丢
+    out.frames = undefined // frames 也可能很大(深栈),三轮再丢
     if (out.error.stack && out.error.stack.length > 1500) out.error.stack = out.error.stack.slice(0, 1500) + '…<truncated>'
     if (out.error.message.length > 2000) out.error.message = out.error.message.slice(0, 2000) + '…'
   }
@@ -157,8 +161,9 @@ export class Queue {
         onFail: (records, reason) => this.recover(records as FrontendErrorRecord[], reason),
       })
       if (!dispatched) {
-        // 没派发出去(无通道/罕见同步失败):原样收回,不算一次重试。
+        // 没派发出去(无通道/罕见同步失败):原样收回,不算一次重试;安排下一次,别等下个 add()。
         this.buf.unshift(...recs)
+        this.arm(this.flushInterval)
         ok = false
       }
     }
@@ -185,6 +190,7 @@ export class Queue {
   private recover(records: FrontendErrorRecord[], reason: SendFailReason): void {
     if (reason === 'rejected') {
       this.dropped += records.length // 413/422:重试也不会成功 → 丢弃,经 onDrop 可感知
+      this.arm(this.flushInterval) // 安静页面也要让 onDrop 回执在下一轮 flush 响起来,别等下个 add()
 
       return
     }

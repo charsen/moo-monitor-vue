@@ -92,6 +92,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `httpErrors` | `true` | fetch 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭 |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |
+| `onError` | — | SDK 自身错误 / 丢弃回执回调(默认静默,绝不抛回宿主) |
 
 ## 云端准备
 
@@ -142,7 +143,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 - **键盘绝不记内容**:只记 Enter/Escape 与「开始在某输入框打字」这件事,按键值 / 输入值 / 密码一概不采;输入控件的描述只用 name/placeholder/type。
 - **breadcrumbs 里的 fetch 是「轨迹」不是「上报」**:平时不单独发,只在真出错时随错误一起带上;只记 url/method/status,**不抓请求 / 响应体**。
 - **不发 cookie / 凭证**(`credentials: 'omit'`);token 放请求体。
-- **脱敏**:消息 / 堆栈 / 页面 URL 里像密钥的内容(`token=…`、JWT、`Bearer …`)在**云端读取时**统一打码(展示 / 通知 / 复制给 AI 都不外泄)。
+- **脱敏**:消息 / 堆栈 / 页面 URL / 轨迹里像密钥的内容(`token=…`、JWT、`Bearer …`)**在 SDK 出站前就打码**(密钥不离开浏览器);云端写入与读取时再各兜底一层。
 - **聚合而非逐条风暴**:同一错误按指纹合并、累加 `count`、批量发送。
 
 ## 上报数据形态
@@ -151,7 +152,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 ```jsonc
 {
-  "hash": "ab12cd34ef56",            // 客户端指纹(类型+消息+栈顶帧),12 位 hex
+  "hash": "ab12cd34ef56",            // 客户端指纹(仅用于 SDK 端合并;云端忽略并重算,防投毒)
   "error": { "name": "TypeError", "message": "...", "stack": "...", "handled": false, "severity": "error" },
   "page": { "url": "https://.../cart", "referrer": "..." },
   "client": { "user_agent": "...", "browser": "Chrome", "browser_version": "120", "os": "macOS" },

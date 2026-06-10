@@ -42,10 +42,12 @@ export function toError(input: unknown): Error {
 /**
  * 指纹用的稳定文件名:剥掉构建器的内容 hash 段(index-DfA3k2Lz.js → index.js)——
  * 否则每次发版产物名全换,所有错误的指纹跟着换 → 全量重新分组、首见(NEW)告警风暴、
- * 趋势/影响会话统计从零开始。8~16 位段长避开 -legacy/.min 这类语义后缀。
+ * 趋势/影响会话统计从零开始。
+ * 约束(与云端 serverHash 同口径):段长 8~16 且【须含数字】(user-settings.js 这类
+ * 人工命名不误伤);兼容 .min.js 后缀(app-Df3kZ2Lz.min.js 也要剥)。
  */
 function stableFile(file?: string): string {
-  return (file || '?').replace(/[-.][A-Za-z0-9_-]{8,16}(?=\.m?js\b)/, '')
+  return (file || '?').replace(/[-.](?=[\w-]{0,15}\d)[\w-]{8,16}(?=(?:\.min)?\.m?js\b)/, '')
 }
 
 /**

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.6
+
+第九轮对抗审查 —— 修复 6 个问题:
+
+1. **setExtra 无界且超限连坐**:一个大 extra(如整棵 store 快照)让每条记录超限,
+   截断二轮会把 frames/breadcrumbs 一起炸掉。setExtra 序列化超 8KB 占位替换
+   (循环引用/BigInt 同);截断改分级:先只丢 payload,够了就保住栈和轨迹。
+2. **Vite 插件 deleteAfterUpload × sourcemap:true 留悬空注释**:map 删了、JS 尾部
+   sourceMappingURL 注释还在 → 全量访客 devtools 每 chunk 一个 404。configResolved
+   读最终配置,该组合下删 map 同时剥掉注释(等效 'hidden');文件被云端拒而跳过删除时
+   明示「产物目录仍有源码」。
+3. **__mooSeen 防双计标记泄漏**:对 throw {code:403} 这类非 Error 抛掷物,可枚举属性
+   会被序列化进上报消息与两端指纹。改 Object.defineProperty 不可枚举。
+4. **stableFile 误伤与漏配**:user-settings.js(人工命名)被当 hash 剥掉、与真 user.js
+   误归并;app-Df3kZ2Lz.min.js 又漏配。约束改为「段须含数字 + 兼容 .min.js」
+   (云端 serverHash 同步,需配套部署)。
+5. **queue 两处滞留不 arm**:同步派发失败回收后、语义拒绝(413/422)计数后都不安排
+   下一次 flush —— 安静页面上记录滞留、onDrop 回执要等下个错误才响。补 arm。
+6. **国产内嵌浏览器识别**:微信(MicroMessenger)/ 钉钉 / QQ / UC 的 UA 都带 Chrome/,
+   全被识别成 Chrome —— 国内产品错误大户恰是微信内嵌页,浏览器分布完全失真。
+   新增四家识别,置于 Chrome 判定之前。
+
+- README 修订:脱敏措辞(SDK 出站打码,云端双兜底)、选项表补 onError
+  (0.3.3 的替换静默失败,本次已验证)、hash 字段注明「仅客户端合并用,云端重算」。
+- 测试 +7,109 passed。
+
 ## 0.3.5
 
 第八轮对抗审查 —— 修复 6 个问题:
