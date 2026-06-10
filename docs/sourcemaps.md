@@ -14,7 +14,10 @@ CI 构建(vite build, sourcemap: 'hidden')
   └─ 云端 intake 后异步任务(或打开详情时兜底)按
        「帧文件 basename == 工件 file_name && release 完全一致」
      找到 map → 流式 VLQ 解析 → 还原成源码 file:line:column(+ 函数名)
-  └─ 生效处:详情抽屉「调用栈」/「复制给 AI 修复」markdown / 列表摘要(出错组件,如 Foo.vue)
+       └─ 还原位置之外,再从 map 内嵌的 sourcesContent 抽出错行 ±3 行源码
+          (前 5 个还原帧,逐行截断 + 密钥脱敏后才入库)
+  └─ 生效处:详情抽屉「调用栈」(每帧可展开源码、出错行高亮)/
+     「复制给 AI 修复」markdown(位置 + 出错源码块)/ 列表摘要(出错组件,如 Foo.vue)
 ```
 
 - **还原结果缓存在错误记录上**(`src_frames`),不会每次打开都重算;同 release 重新上传 map 会自动重置缓存、触发重算。
@@ -57,5 +60,7 @@ CI 构建(vite build, sourcemap: 'hidden')
 ## 安全
 
 - map 文件含源码,云端存**私有盘**,仅项目成员经面板可见(工件列表只显示元数据,文件本身不提供下载)。
+- 详情里展示的「出错源码」摘自 `sourcesContent`,入库前逐行截断并过密钥脱敏(`token=…`/JWT/Bearer 打码),
+  且仅项目成员可见;若完全不想让源码上云,可在构建时关掉 sourcemap 的源码内嵌(代价:无源码上下文,只剩位置还原)。
 - 生产站点建议 `sourcemap: 'hidden'` + `deleteAfterUpload: true`:`.map` 不留在服务器、产物里也没有指向注释。
 - 上传 token 与浏览器 token 分离(能力隔离),泄漏面只在 CI。

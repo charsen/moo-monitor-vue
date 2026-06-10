@@ -163,7 +163,9 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 生产构建是压缩过的,堆栈里只有 `index-abc123.js:1:23456` 这类位置。把构建产物的 `.map` 上传到云端后,
 错误详情的调用栈会还原成 `src/components/Foo.vue:42:10 render` —— `.vue` 文件即出错组件;
-「复制给 AI 修复」的 markdown 与列表摘要也会用还原后的源码位置。**VIP 专享**(按项目拥有者的会员判定)。
+还会从 map 内嵌的 `sourcesContent` 取出**出错行 ±3 行源码**直接展示(出错行高亮),
+「复制给 AI 修复」的 markdown 同时带源码位置 + 出错源码块,列表摘要显示出错组件。
+**VIP 专享**(按项目拥有者的会员判定)。
 
 **1)云端生成上传 token**:`/app → 接入 Token → 生成`,**只勾「Sourcemap 上传」**。
 这枚 token 是 CI 密钥 —— 绝不能复用 SDK init 那枚 `frontend_errors` token(它在浏览器 JS 里人人可见,
