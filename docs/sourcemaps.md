@@ -32,6 +32,9 @@ CI 构建(vite build, sourcemap: 'hidden')
 1. **token**:`/app → 接入 Token → 生成`,只勾 **「Sourcemap 上传」**,存进 CI 的 secret(如 `MOO_SOURCEMAP_TOKEN`)。
    - ⚠️ 不要复用浏览器里的 `frontend_errors` token:那枚是公开的,复用 = 任何人都能灌/覆盖你的 map。
 2. **vite.config.ts**:`build.sourcemap: 'hidden'` + `mooSourcemapUpload({ endpoint, token, release, deleteAfterUpload: true })`。
+   - ⚠️ `endpoint` 只填基址(如 `https://cloud.example.com/api/v1`),**与 SDK init 的 endpoint 同值原样照抄**,
+     不要自己拼 `/sourcemaps/intake`(少 `/api/v1` 或填成业务站域名都会 404);
+   - 大型多入口项目 map 很多时,可用 `include` 只传业务入口:`include: /assets\/(index|admin)-.*\.js\.map$/`。
 3. **release 三处一致**(这是最常见的翻车点):
    - SDK `init({ release })`(运行时,随错误上报);
    - 插件 `release`(构建时,随 map 上传);
@@ -53,6 +56,7 @@ CI 构建(vite build, sourcemap: 'hidden')
 | 症状 | 排查 |
 | --- | --- |
 | 详情里还是压缩位置 | ⓪ 插件与 SDK 是否都 ≥0.3.7(Debug ID 自动匹配,基本免排查);老接入:① release 是否三处一致(错误详情「上下文」里的 release vs Sourcemap 页的分组名);② 帧文件名(如 `index-abc123.js`)在该 release 分组下是否有同名工件;③ 部署的构建和上传 map 的构建是否同一次(文件名 hash 对不上就是两次构建) |
+| 上传报 `HTTP 404` | `endpoint` 配错:少了 `/api/v1`、或填成了业务站域名 —— 与 SDK init 的 endpoint 是同一个值,原样照抄;插件内部自动拼 `/sourcemaps/intake` |
 | 插件日志「未发现 .map 产物」 | `build.sourcemap` 没开;设 `'hidden'` 或 `true` |
 | 403 `vip_required` | 项目拥有者不是 VIP;开通后重传 |
 | 403(无 vip 字样) | token 没有 `sourcemaps` 能力,或已吊销/过期 |
