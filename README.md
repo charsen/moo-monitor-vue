@@ -7,7 +7,7 @@
 ## 特性
 
 - **四大捕获通道**(不漏报):`window.onerror`(带 `error.stack`)+ 未处理 Promise(`unhandledrejection`)+ **Vue `app.config.errorHandler`**(Vue 吞掉的渲染/生命周期错误不冒泡到 `onerror`,必须单独接)+ 资源加载错误(捕获阶段)。
-- **行为轨迹 breadcrumbs**:点击、fetch 请求自动记录(环形队列),随错误一起上报,还原「报错前发生了什么」。
+- **行为轨迹 breadcrumbs**:点击(解析到就近交互元素 + 可读文本)、键盘关键节点(Enter/Escape + 「开始输入」聚合,**绝不记输入内容**)、SPA 路由跳转(`from → to`)、fetch 请求 —— 自动串成「报错前用户做了什么」的操作链路;另自动捕获 **HTTP ≥500 响应**为错误、自动生成**会话 ID**(影响用户数可统计)。
 - **上下文**:`release`(版本,sourcemap 还原的匹配键)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
 - **sourcemap 还原(VIP)**:配套 Vite 插件构建后自动上传 `.map`,云端把压缩堆栈还原成源码位置(`.vue` 文件即出错组件),见 [sourcemap 还原](#sourcemap-还原vip)。
 - **可靠上报**:客户端按指纹**合并计数**(同错误累加 `count`、风暴不刷屏)、`sampleRate` 采样、`ignoreErrors` 噪音过滤、批量队列(按字节分批避开 64KB 上限)、页面卸载(`pagehide`/`visibilitychange`)用 `sendBeacon` 兜底发送(失败回退 `fetch keepalive`)。
@@ -87,7 +87,9 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `maxBatch` | `20` | 单批最多条数 |
 | `enabled` | `true` | 总开关 |
 | `autoCapture` | `true` | 自动捕获全局/Promise/资源错误 |
-| `autoBreadcrumbs` | `true` | 自动记录点击 / fetch 轨迹 |
+| `autoBreadcrumbs` | `true` | 自动记录点击 / 键盘 / 路由 / fetch 轨迹(键盘只记按键与目标,绝不记内容) |
+| `autoSession` | `true` | 自动生成会话 ID(sessionStorage,标签页生命周期);`setUser({ sessionId })` 优先 |
+| `httpErrors` | `true` | fetch 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭 |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |
 
@@ -110,13 +112,14 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 这是个**前端异常监控**:只采集「错误」类事件 + 出错现场的环境与行为轨迹,**不**采集正常业务数据、性能指标或录屏。
 
-**捕获来源(5 类,都是错误):**
+**捕获来源(6 类,都是错误):**
 
 1. 未捕获的 JS 运行时错误 —— `window.onerror`(带堆栈)
 2. 未处理的 Promise 拒绝 —— `unhandledrejection`
 3. Vue 组件错误 —— `app.config.errorHandler`(渲染/生命周期/watch,这些不冒泡到 `onerror`,故单独接)
 4. 资源加载失败 —— 捕获阶段 error 事件(img/script/css 404 等,记为 `warning`)
-5. 手动上报 —— `captureException(e)` / `captureMessage('…')`
+5. HTTP 响应错误 —— 经包裹的 fetch,状态码 ≥500(可调 / 可关)记为 `HttpError`
+6. 手动上报 —— `captureException(e)` / `captureMessage('…')`
 
 > 不会上报:正常接口请求、性能指标(FCP/LCP…)、用户行为本身、页面录屏 —— 均不在 v1 范围(见[路线图](#路线图))。
 
@@ -129,13 +132,14 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | 页面 | 出错页面 URL、referrer |
 | 浏览器 / 设备 | UA、浏览器 + 版本、系统、设备类型(Mobile/Tablet/Desktop) |
 | 上下文 | 环境 `env`、版本 `release`、来源 `project`、发生时间 |
-| 行为轨迹 `breadcrumbs` | 报错前的**点击**与 **fetch 请求**(method/url/status,环形队列约 30 条) |
-| 用户 | `id` / `name` / `session_id`(需调 `setUser(...)` 注入,否则没有) |
+| 行为轨迹 `breadcrumbs` | 报错前的**点击**(交互元素 + 可读文本)、**键盘关键节点**(Enter/Escape、「开始输入」,无内容)、**路由跳转**(from → to)与 **fetch 请求**(method/url/status);环形队列约 30 条 |
+| 用户 | `id` / `name`(需 `setUser(...)`);`session_id` 自动生成(标签页生命周期,可关) |
 | 自定义 | `tags` / `extra`(`captureException(e, { tags, extra })` 传入) |
 | 聚合 | 指纹 `hash`、出现次数 `count`、首次 / 最近时间 |
 
 **隐私与边界:**
 
+- **键盘绝不记内容**:只记 Enter/Escape 与「开始在某输入框打字」这件事,按键值 / 输入值 / 密码一概不采;输入控件的描述只用 name/placeholder/type。
 - **breadcrumbs 里的 fetch 是「轨迹」不是「上报」**:平时不单独发,只在真出错时随错误一起带上;只记 url/method/status,**不抓请求 / 响应体**。
 - **不发 cookie / 凭证**(`credentials: 'omit'`);token 放请求体。
 - **脱敏**:消息 / 堆栈 / 页面 URL 里像密钥的内容(`token=…`、JWT、`Bearer …`)在**云端读取时**统一打码(展示 / 通知 / 复制给 AI 都不外泄)。

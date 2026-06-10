@@ -1,8 +1,10 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
+import { describeElement, isEditable } from './dom'
 import { normalize } from './normalize'
 import { Queue } from './queue'
 import { isIgnored, shouldSample } from './sampling'
 import { Scope } from './scope'
+import { autoSessionId } from './session'
 import { resolveOptions, type Breadcrumb, type CaptureHint, type FrontendErrorRecord, type MooOptions, type MooUser, type ResolvedOptions } from './types'
 
 type AnyFetch = typeof fetch & { __mooPatched?: boolean }
@@ -18,10 +20,20 @@ export class MooClient {
   private onErrorEvt?: EventListener
   private onRejection?: EventListener
   private onClick?: EventListener
+  private onKeydown?: EventListener
+  private onPopstate?: EventListener
   private onVisibility?: () => void
   private onPagehide?: () => void
   private origFetch?: typeof fetch
   private patchedFetch?: AnyFetch
+  private origPushState?: History['pushState']
+  private origReplaceState?: History['replaceState']
+  private patchedPushState?: History['pushState']
+  private patchedReplaceState?: History['replaceState']
+  /** 打字聚合:同一元素的连续输入只记一条「输入 →」crumb(换元素 / 按 Enter/Escape 后重新计)。 */
+  private lastInputEl: Element | null = null
+  /** popstate(后退/前进)的 from 路径。 */
+  private lastPath = ''
 
   constructor(options: MooOptions) {
     this.opts = resolveOptions(options)
@@ -38,11 +50,17 @@ export class MooClient {
   captureException(input: unknown, hint: CaptureHint = {}): void {
     try {
       if (!this.opts.enabled) return
+      // 会话自动化:setUser 给的 sessionId 优先;否则补上自动生成的(autoSession 关闭则不补)。
+      let user = this.scope.user
+      if (this.opts.autoSession) {
+        const sid = user?.sessionId ?? autoSessionId()
+        if (sid) user = { ...(user || {}), sessionId: sid }
+      }
       const rec = normalize(input, {
         env: this.opts.env,
         release: this.opts.release,
         project: this.opts.project,
-        user: this.scope.user,
+        user,
         tags: { ...this.scope.tags, ...(hint.tags || {}) },
         extra: { ...this.scope.extra, ...(hint.extra || {}) },
         breadcrumbs: this.crumbs.all(),
@@ -93,10 +111,14 @@ export class MooClient {
       if (this.onErrorEvt) window.removeEventListener('error', this.onErrorEvt, true)
       if (this.onRejection) window.removeEventListener('unhandledrejection', this.onRejection)
       if (this.onClick) window.removeEventListener('click', this.onClick, true)
+      if (this.onKeydown) window.removeEventListener('keydown', this.onKeydown, true)
+      if (this.onPopstate) window.removeEventListener('popstate', this.onPopstate)
       if (this.onVisibility) window.removeEventListener('visibilitychange', this.onVisibility)
       if (this.onPagehide) window.removeEventListener('pagehide', this.onPagehide)
-      // 仅当当前 fetch 仍是本实例打的补丁时才还原(别覆盖他人后续的补丁)。
+      // 仅当当前补丁仍是本实例打的才还原(别覆盖他人后续的补丁)。
       if (this.origFetch && (window.fetch as AnyFetch) === this.patchedFetch) window.fetch = this.origFetch
+      if (this.origPushState && window.history.pushState === this.patchedPushState) window.history.pushState = this.origPushState
+      if (this.origReplaceState && window.history.replaceState === this.patchedReplaceState) window.history.replaceState = this.origReplaceState
     }
     this.installed = false
     this.opts.enabled = false // 关闭后不再捕获
@@ -149,15 +171,37 @@ export class MooClient {
   }
 
   private installBreadcrumbs(): void {
-    // 点击:记录可读选择器(tag#id.class),不存 DOM。className 在 SVG 上是 SVGAnimatedString,非 string → 跳过。
+    // 点击:document 级捕获,解析「用户操作的元素」—— 就近交互祖先(点中 button 里的 span 也归到 button)
+    // + 可读选择器 + aria/文本提示(见 dom.ts;输入控件绝不取值)。不存 DOM 引用。
     this.onClick = (e: Event) => {
       const t = e.target as Element | null
       if (!t || !t.tagName) return
-      const cls = typeof t.className === 'string' && t.className ? '.' + t.className.trim().split(/\s+/).join('.') : ''
-      const sel = (t.tagName.toLowerCase() + (t.id ? '#' + t.id : '') + cls).slice(0, 100)
-      this.addBreadcrumb({ category: 'click', message: sel })
+      this.lastInputEl = null // 点了别处,下一段输入重新记
+      this.addBreadcrumb({ category: 'click', message: describeElement(t) })
     }
     window.addEventListener('click', this.onClick, true)
+
+    // 键盘:只记两类、绝不记输入内容 ——
+    //   ① Enter / Escape(提交、取消的关键节点);
+    //   ② 可编辑元素上的「开始输入」(同一元素的连续打字聚合成一条,只记目标不记值)。
+    this.onKeydown = (e: Event) => {
+      const ke = e as KeyboardEvent
+      const t = ke.target as Element | null
+      if (ke.key === 'Enter' || ke.key === 'Escape') {
+        this.lastInputEl = null
+        this.addBreadcrumb({ category: 'key', message: `${ke.key} → ${describeElement(t)}` })
+        return
+      }
+      if (ke.ctrlKey || ke.metaKey || ke.altKey) return // 快捷键不算输入
+      if (ke.key.length === 1 && t && t.tagName && isEditable(t)) {
+        if (this.lastInputEl === t) return
+        this.lastInputEl = t
+        this.addBreadcrumb({ category: 'input', message: `输入 → ${describeElement(t)}` })
+      }
+    }
+    window.addEventListener('keydown', this.onKeydown, true)
+
+    this.installNavigationBreadcrumbs()
 
     // fetch:记录 method/url/status 作 breadcrumb;排除上报自身 URL,防死循环。
     // 哨兵 __mooPatched 防重复 init() 叠加包裹(否则每层各记一条 breadcrumb)。
@@ -173,7 +217,17 @@ export class MooClient {
         const skip = !url || url.indexOf(self) !== -1
         return orig(...args).then(
           (res) => {
-            if (!skip) this.addBreadcrumb({ category: 'fetch', level: res.ok ? 'info' : 'error', message: `${method} ${url} ${res.status}` })
+            if (!skip) {
+              this.addBreadcrumb({ category: 'fetch', level: res.ok ? 'info' : 'error', message: `${method} ${url} ${res.status}` })
+              // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
+              // 丢弃 SDK 内部帧;指纹按 名称+消息(状态码/URL 里的 id 都会被归一)聚合。
+              if (this.opts.httpErrorsMin !== null && res.status >= this.opts.httpErrorsMin) {
+                this.captureException(
+                  { name: 'HttpError', message: `${method} ${url} ${res.status}` },
+                  { handled: false, severity: 'error', extra: { status: res.status, method } },
+                )
+              }
+            }
             return res
           },
           (err) => {
@@ -186,6 +240,45 @@ export class MooClient {
       this.patchedFetch = patched
       window.fetch = patched
     }
+  }
+
+  /**
+   * 路由轨迹:包裹 history.pushState/replaceState(SPA 路由都走这两个)+ popstate(后退/前进),
+   * 记 `from → to`(pathname+search,出站时统一脱敏)。哨兵防重复包裹;close() 按引用还原。
+   */
+  private installNavigationBreadcrumbs(): void {
+    const h = window.history as History | undefined
+    if (!h || typeof h.pushState !== 'function') return
+
+    this.lastPath = location.pathname + location.search
+    const record = (from: string) => {
+      const to = location.pathname + location.search
+      if (to !== from) {
+        this.lastPath = to
+        this.addBreadcrumb({ category: 'navigation', message: `${from} → ${to}` })
+      }
+    }
+
+    type PatchedFn = History['pushState'] & { __mooPatched?: boolean }
+    if (!(h.pushState as PatchedFn).__mooPatched) {
+      this.origPushState = h.pushState
+      this.origReplaceState = h.replaceState
+      const wrap = (orig: History['pushState']): History['pushState'] => {
+        const fn = function (this: History, ...args: Parameters<History['pushState']>) {
+          const from = location.pathname + location.search
+          const ret = orig.apply(this, args)
+          record(from) // record 是箭头函数,this 已绑定客户端实例
+          return ret
+        } as PatchedFn
+        fn.__mooPatched = true
+        return fn
+      }
+      this.patchedPushState = h.pushState = wrap(this.origPushState)
+      this.patchedReplaceState = h.replaceState = wrap(this.origReplaceState)
+    }
+
+    this.onPopstate = () => record(this.lastPath)
+    window.addEventListener('popstate', this.onPopstate)
   }
 
   private installFlushOnHide(): void {

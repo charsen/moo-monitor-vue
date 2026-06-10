@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.1
+
+**采集面升级**:操作链路(点击/键盘/路由)、HTTP 错误捕获、会话自动化。
+
+- **操作链路 breadcrumbs**(回应「document 监听点击/键盘、解析操作元素、做出链路」的诉求):
+  - 点击:解析**就近交互祖先**(点中 button 里的 span 也归到 button),描述为
+    `tag#id.前两类 + aria/可见文本`(如 `button#checkout.btn "去结算"`);
+  - 键盘:只记 **Enter/Escape**(提交/取消节点)与「**开始输入** → 目标元素」(同元素连续
+    打字聚合一条;ctrl/meta 快捷键忽略)——**绝不记录按键值/输入内容**,输入控件只用
+    name/placeholder/type 标识;
+  - 路由:包裹 `history.pushState/replaceState` + `popstate`,记 `from → to`
+    (哨兵防重复包裹,`close()` 按引用还原)。
+- **HTTP 响应错误自动捕获**:经包裹的 fetch,状态码 ≥500(默认;`httpErrors: { min }` 可调,
+  `false` 关闭)生成 `HttpError` 记录(合成栈 → 不带 SDK 内部帧;状态码/URL id 随指纹归一聚合);
+  自身上报地址豁免(防死循环)。
+- **会话自动化**:`autoSession`(默认开)首次取用时生成 24 位 hex 存 sessionStorage
+  (标签页生命周期;隐私模式退化为内存级),`setUser({ sessionId })` 优先 ——
+  云端「影响用户数/会话数」不再依赖宿主手动注入。
+- 测试 +17(元素解析 / 键盘聚合与隐私 / 路由还原 / HTTP 阈值与豁免 / session / beforeSend
+  改写与丢弃 —— 后者补上历史缺口);全量 75 passed。
+
 ## 0.3.0
 
 **sourcemap 还原(VIP)**:新增 `moo-monitor-vue/vite` 构建插件,与云端还原管线配套。

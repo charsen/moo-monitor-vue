@@ -85,8 +85,15 @@ export interface MooOptions {
   enabled?: boolean
   /** 自动捕获全局错误 / 未处理 Promise / 资源错误,默认 true。 */
   autoCapture?: boolean
-  /** 自动记录 breadcrumbs(点击 / fetch),默认 true。 */
+  /** 自动记录 breadcrumbs(点击 / 键盘 / 路由 / fetch),默认 true。键盘只记按键与目标元素,绝不记输入内容。 */
   autoBreadcrumbs?: boolean
+  /** 自动生成会话 ID(sessionStorage,标签页生命周期),默认 true;setUser({ sessionId }) 优先。 */
+  autoSession?: boolean
+  /**
+   * HTTP 响应错误自动捕获(经包裹的 fetch):默认 true = 状态码 ≥500 生成一条 HttpError;
+   * { min: 400 } 可降阈值;false 关闭(仅留 fetch breadcrumb)。
+   */
+  httpErrors?: boolean | { min?: number }
   /** 噪音过滤:消息命中即丢弃(字符串包含或正则匹配)。 */
   ignoreErrors?: (string | RegExp)[]
   /** 发送前钩子:返回 null 丢弃,可改写记录(脱敏 / 加字段)。 */
@@ -109,6 +116,9 @@ export interface ResolvedOptions {
   enabled: boolean
   autoCapture: boolean
   autoBreadcrumbs: boolean
+  autoSession: boolean
+  /** HTTP 错误捕获阈值;null = 关闭。 */
+  httpErrorsMin: number | null
   ignoreErrors: (string | RegExp)[]
   beforeSend?: (event: FrontendErrorRecord) => FrontendErrorRecord | null
   onError?: (err: unknown) => void
@@ -128,6 +138,8 @@ export function resolveOptions(o: MooOptions): ResolvedOptions {
     enabled: o.enabled ?? true,
     autoCapture: o.autoCapture ?? true,
     autoBreadcrumbs: o.autoBreadcrumbs ?? true,
+    autoSession: o.autoSession ?? true,
+    httpErrorsMin: o.httpErrors === false ? null : o.httpErrors === true || o.httpErrors == null ? 500 : (o.httpErrors.min ?? 500),
     ignoreErrors: o.ignoreErrors ?? [],
     beforeSend: o.beforeSend,
     onError: o.onError,
