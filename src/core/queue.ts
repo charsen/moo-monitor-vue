@@ -1,4 +1,4 @@
-import { send, inBackoff, backoffRemaining } from './transport'
+import { send, inBackoff, backoffRemaining, type SendFailReason } from './transport'
 import type { FrontendErrorRecord } from './types'
 
 // sendBeacon / fetch keepalive 的 body 上限约 64KB,留余量给 token 包裹 → 单批 ≤ 56KB。
@@ -50,6 +50,8 @@ export class Queue {
   private buf: FrontendErrorRecord[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   private dropped = 0
+  /** 已失败重试过一次的记录:二次失败即丢弃(计入 dropped),防无限回收循环。 */
+  private retried = new WeakSet<object>()
 
   constructor(
     private url: string,
@@ -60,17 +62,24 @@ export class Queue {
   ) {}
 
   add(record: FrontendErrorRecord): void {
-    // 同 hash 合并:累加 count、取最新 last_seen、保留最早 first_seen —— 单窗口内风暴不刷网络且计数不丢。
-    const existing = this.buf.find((r) => r.hash === record.hash)
-    if (existing) {
-      existing.count = (existing.count ?? 1) + (record.count ?? 1)
+    // 同 hash 合并:累加 count;现场字段(breadcrumbs/page/user/context)整体取「最新一次发生」——
+    // 云端 upsert 是 last-write-wins,若保留窗口内第一次的现场,长退避/积压后云端展示的
+    // 轨迹和页面是几分钟前的旧现场,却盖着崭新的 last_seen。
+    const idx = this.buf.findIndex((r) => r.hash === record.hash)
+    if (idx !== -1) {
+      const existing = this.buf[idx]
+      const merged: FrontendErrorRecord = { ...record }
+      merged.count = (existing.count ?? 1) + (record.count ?? 1)
       // last_seen 取「最新」、first_seen 取「最早」—— 防乱序 / beforeSend 改写时间导致回退。
-      if (record.last_seen && (!existing.last_seen || record.last_seen > existing.last_seen)) {
-        existing.last_seen = record.last_seen
-      }
-      if (record.first_seen && (!existing.first_seen || record.first_seen < existing.first_seen)) {
-        existing.first_seen = record.first_seen
-      }
+      merged.last_seen =
+        record.last_seen && (!existing.last_seen || record.last_seen > existing.last_seen)
+          ? record.last_seen
+          : existing.last_seen
+      merged.first_seen =
+        record.first_seen && (!existing.first_seen || record.first_seen < existing.first_seen)
+          ? record.first_seen
+          : existing.first_seen
+      this.buf[idx] = merged
       return
     }
     if (this.buf.length >= MAX_BUFFER) {
@@ -103,9 +112,10 @@ export class Queue {
       clearTimeout(this.timer)
       this.timer = null
     }
-    // 退避中:绝不动 buf —— 否则记录被 splice 后随 send 一起丢失。安排「退避结束后」再 flush;
-    // 期间记录留在 buf(有 MAX_BUFFER 上限保护)。
-    if (inBackoff()) {
+    // 退避中:绝不动 buf,安排「退避结束后」再 flush。
+    // 例外:页面卸载(useBeacon)豁免退避 —— 安排的重试定时器会随页面一起死,
+    // 不发这一枪整个缓冲就没了;一次性 beacon 不构成对云端的重试风暴。
+    if (inBackoff() && !useBeacon) {
       const t = setTimeout(() => this.flush(), Math.max(1000, backoffRemaining() + 100))
       ;(t as unknown as { unref?: () => void }).unref?.()
       this.timer = t
@@ -129,10 +139,20 @@ export class Queue {
     let size = 0
 
     const sendBatch = () => {
-      if (batch.length) {
-        ok = send(this.url, this.token, batch, useBeacon) && ok
-        batch = []
-        size = 0
+      if (!batch.length) return
+      const recs = batch
+      batch = []
+      size = 0
+      const dispatched = send(this.url, this.token, recs, {
+        useBeacon,
+        force: useBeacon, // 卸载路径豁免退避(见上)
+        // 失败回收:429/网络错回缓冲重试一次,4xx 语义拒绝丢弃但计数 —— 此前这批直接人间蒸发。
+        onFail: (records, reason) => this.recover(records as FrontendErrorRecord[], reason),
+      })
+      if (!dispatched) {
+        // 没派发出去(无通道/罕见同步失败):原样收回,不算一次重试。
+        this.buf.unshift(...recs)
+        ok = false
       }
     }
 
@@ -146,6 +166,27 @@ export class Queue {
     }
     sendBatch()
     return ok
+  }
+
+  /** 派发后失败的回收:可重试原因(429/网络/5xx)回缓冲一次,二次失败或语义拒绝丢弃并计数。 */
+  private recover(records: FrontendErrorRecord[], reason: SendFailReason): void {
+    if (reason === 'rejected') {
+      this.dropped += records.length // 413/422:重试也不会成功 → 丢弃,经 onDrop 可感知
+
+      return
+    }
+    let requeued = false
+    for (const r of records) {
+      if (this.retried.has(r) || this.buf.length >= MAX_BUFFER) {
+        this.dropped++
+        continue
+      }
+      this.retried.add(r)
+      this.buf.unshift(r) // 回收到队首,保持大致时序
+      requeued = true
+    }
+    // 安排重发:429 时下一次 flush 会撞退避分支,自动顺延到退避结束。
+    if (requeued) this.arm(this.flushInterval)
   }
 
   size(): number {

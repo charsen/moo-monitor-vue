@@ -103,7 +103,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 ## 规模化与限流
 
-- **批量降频**:SDK 按 `flushInterval`(默认 5s)+ `maxBatch` 合并上报,单个用户每分钟请求数很低;但**同一前端 token 被所有访客共享**,高流量站点的聚合请求可能撞到云端 **per-token 限流**(默认 `INTAKE_RATE_LIMIT_PER_MIN=120/min`),超出会 429 且 SDK 不重试(丢弃)。应对:为前端单独签发 token、按量调高云端 `INTAKE_RATE_LIMIT_PER_MIN`,并用 `sampleRate` 在客户端降采样。
+- **批量降频**:SDK 按 `flushInterval`(默认 5s)+ `maxBatch` 合并上报,单个用户每分钟请求数很低;但**同一前端 token 被所有访客共享**,高流量站点的聚合请求可能撞到云端 **per-token 限流**(默认 `INTAKE_RATE_LIMIT_PER_MIN=120/min`),超出会 429:SDK 进入退避(按 Retry-After),被拒的批回收重试一次,仍失败才丢弃(经 `onError` 可感知)。应对:为前端单独签发 token、按量调高云端 `INTAKE_RATE_LIMIT_PER_MIN`,并用 `sampleRate` 在客户端降采样。
 - **per-IP 限流**:云端还有 per-IP 限流(默认 `max(perMin×5, 600)/min`);办公网 / NAT 下大量用户共享出口 IP 时需留意。
 - **配额**:免费档每项目只保留**最新 30 条**前端错误(VIP 不限);高基数错误(大量不同指纹)会快速 churn —— 善用 `ignoreErrors` + `sampleRate` + 云端「忽略/静音」收敛。
 - **CORS**:云端对 `/api/v1/*` 放行任意 origin 的 `POST`,但**只允许 `Content-Type` / `Accept` 头**。SDK 因此把 token 放在请求体、不加任何自定义头;**请勿**给 SDK 加自定义请求头(会触发预检失败)。

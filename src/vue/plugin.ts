@@ -17,6 +17,10 @@ export type VuePluginOptions = MooOptions & {
 export const MooMonitor: Plugin = {
   install(app: App, options: VuePluginOptions) {
     const client = init(options)
+    // 注入先于 SSR 判断:setup/created 在服务端也会跑,inject('mooMonitor') / this.$moo
+    // 必须两端都拿得到(客户端未 install 时这些 API 本身就是安全 no-op)。
+    app.provide('mooMonitor', client)
+    app.config.globalProperties.$moo = client
     if (typeof window === 'undefined') return // SSR:不接管浏览器侧捕获
 
     const prev = app.config.errorHandler
@@ -40,9 +44,6 @@ export const MooMonitor: Plugin = {
         console.error(err)
       }
     }
-
-    app.provide('mooMonitor', client)
-    app.config.globalProperties.$moo = client
   },
 }
 

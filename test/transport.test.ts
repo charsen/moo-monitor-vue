@@ -8,7 +8,7 @@ describe('transport.send', () => {
     const beacon = vi.fn(() => true)
     Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
 
-    const ok = send(URL_, 'tok123', [{ hash: 'aaaaaaaaaaaa' }], true)
+    const ok = send(URL_, 'tok123', [{ hash: 'aaaaaaaaaaaa' }], { useBeacon: true })
 
     expect(ok).toBe(true)
     expect(beacon).toHaveBeenCalledOnce()
@@ -27,7 +27,7 @@ describe('transport.send', () => {
     const opts = fetchMock.mock.calls[0][1] as RequestInit
     expect(opts.method).toBe('POST')
     expect(opts.headers).toEqual({ 'Content-Type': 'application/json' })
-    expect(opts.keepalive).toBe(true)
+    expect(opts.keepalive).toBe(false) // 常态周期不用 keepalive:其 64KB 配额是全部在途请求共享的
     expect(opts.credentials).toBe('omit')
     const body = JSON.parse(opts.body as string)
     expect(body.token).toBe('tok123')

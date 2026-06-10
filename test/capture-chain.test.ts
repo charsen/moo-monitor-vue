@@ -153,6 +153,33 @@ describe('HTTP 响应错误自动捕获', () => {
     expect(off.find((r) => r.error.name === 'HttpError')).toBeUndefined()
   })
 
+  it('HttpError 指纹分组用去 query/hash 的 URL;extra 不携带完整 URL', async () => {
+    withFetch(502)
+    const { records } = makeClient()
+    await window.fetch('https://api.test/search?q=abc&cursor=xyz#frag')
+
+    const http = records.find((r) => r.error.name === 'HttpError')
+    expect(http?.error.message).toBe('GET https://api.test/search 502') // query/hash 不进指纹
+    expect(JSON.stringify(http?.payload)).not.toContain('cursor')
+  })
+
+  it('连续同一 fetch(轮询)折叠成一条 ×N,插入其他轨迹后另起一条', async () => {
+    withFetch(504)
+    const { crumbsNow } = makeClient({ httpErrors: false })
+    await window.fetch('https://api.test/poll')
+    await window.fetch('https://api.test/poll')
+    await window.fetch('https://api.test/poll')
+    document.body.innerHTML = '<button id="b">B</button>'
+    document.getElementById('b')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await window.fetch('https://api.test/poll')
+
+    const crumbs = crumbsNow()
+    const fetches = crumbs.filter((b) => b.category === 'fetch')
+    expect(fetches).toHaveLength(2) // 3 连击折叠成一条,点击之后另起一条
+    expect(fetches[0].message).toBe('GET https://api.test/poll 504 ×3')
+    expect(fetches[1].message).toBe('GET https://api.test/poll 504')
+  })
+
   it('对 SDK 自身上报地址不捕获(防死循环)', async () => {
     withFetch(503)
     const { records } = makeClient()
@@ -184,6 +211,17 @@ describe('session 自动化', () => {
     const { client: c2, records: r2 } = makeClient({ autoSession: false })
     c2.captureException(new Error('y'))
     expect(r2[0].user).toBeUndefined()
+  })
+})
+
+describe('选项钳制(footgun 防护)', () => {
+  it('httpErrors.min 钳到 ≥400(min:0 不再把 2xx 捕成错误);maxBatch 钳到云端上限 200', async () => {
+    const { resolveOptions } = await import('../src/core/types')
+    const base = { endpoint: 'x', token: 't' }
+    expect(resolveOptions({ ...base, httpErrors: { min: 0 } }).httpErrorsMin).toBe(400)
+    expect(resolveOptions({ ...base, httpErrors: { min: 404 } }).httpErrorsMin).toBe(404)
+    expect(resolveOptions({ ...base, maxBatch: 999 }).maxBatch).toBe(200)
+    expect(resolveOptions({ ...base, maxBatch: 0 }).maxBatch).toBe(1)
   })
 })
 

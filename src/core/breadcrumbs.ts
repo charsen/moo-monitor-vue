@@ -15,6 +15,11 @@ export class BreadcrumbBuffer {
     return this.items.slice()
   }
 
+  /** 最近一条(返回内部对象引用,供 fetch 轨迹「×N」原地折叠等场景)。 */
+  last(): Breadcrumb | undefined {
+    return this.items[this.items.length - 1]
+  }
+
   clear(): void {
     this.items = []
   }

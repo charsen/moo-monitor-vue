@@ -134,12 +134,14 @@ export function resolveOptions(o: MooOptions): ResolvedOptions {
     sampleRate: o.sampleRate ?? 1,
     maxBreadcrumbs: o.maxBreadcrumbs ?? 30,
     flushInterval: o.flushInterval ?? 5000,
-    maxBatch: o.maxBatch ?? 20,
+    // 钳到云端单请求上限 200:超出整批被 422 拒绝(且 422 属语义拒绝,重试也救不回)。
+    maxBatch: Math.min(Math.max(1, o.maxBatch ?? 20), 200),
     enabled: o.enabled ?? true,
     autoCapture: o.autoCapture ?? true,
     autoBreadcrumbs: o.autoBreadcrumbs ?? true,
     autoSession: o.autoSession ?? true,
-    httpErrorsMin: o.httpErrors === false ? null : o.httpErrors === true || o.httpErrors == null ? 500 : (o.httpErrors.min ?? 500),
+    // 阈值钳到 ≥400:min:0 之类会把所有 2xx 也捕成 HttpError,免费档配额瞬间被刷光。
+    httpErrorsMin: o.httpErrors === false ? null : o.httpErrors === true || o.httpErrors == null ? 500 : Math.max(o.httpErrors.min ?? 500, 400),
     ignoreErrors: o.ignoreErrors ?? [],
     beforeSend: o.beforeSend,
     onError: o.onError,

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.3
+
+第六轮对抗审查(可靠投递专项)—— 修复 6 个问题:
+
+1. **多批 flush 静默丢数据**:keepalive/sendBeacon 的 64KB 是「全部在途请求共享」的配额,
+   一次 flush 同步派出 ≥2 批时第二批起整批被吃且无信号。常态周期改用普通 fetch
+   (不带 keepalive),仅页面卸载路径保留 beacon/keepalive。
+2. **429 吃掉触发批 + 非 429 失败不可见**:记录先出队后发送,响应在异步 then 里无人接盘。
+   transport 新增 onFail 失败回收:429(已设退避)/网络错/5xx 回收进缓冲重试一次,
+   二次失败丢弃并计入 dropped(经 onError 可感知);4xx 语义拒绝(413/422)不重试直接计数。
+3. **退避期间页面卸载丢整缓冲**:退避中安排的重试定时器随页面一起死。卸载路径(beacon)
+   豁免退避 —— 一次性发射不构成重试风暴,不发就再也没机会。
+4. **同 hash 合并保留旧现场**:合并只动 count/时间,breadcrumbs/page/occurred_at 停在窗口内
+   第一次发生;云端 last-write-wins 导致展示「崭新 last_seen + 几分钟前的旧轨迹」。
+   改为现场字段整体取最新一次发生(count 累加、first_seen 取最早不变)。
+5. **HttpError 指纹基数爆炸 + fetch 轨迹刷屏**:URL 去 query/hash 后再进指纹(轮询/搜索/游标
+   场景不再每个 query 一个 hash 刷爆配额);连续同一请求的 fetch 轨迹原地折叠成「×N」
+   (插入其他轨迹则另起一条),30 格轨迹不再被轮询刷光。
+6. **集成层三个 footgun**:SSR 下 provide/$moo 注入被 SSR 判断短路(服务端 inject 得 undefined,
+   与 docblock 矛盾)→ 注入提前;`httpErrors.min` 钳到 ≥400(min:0 会把 2xx 也捕成错误);
+   `maxBatch` 钳到云端上限 200(超出整批 422 静默拒)。
+
+- 测试 +10(失败回收/卸载豁免/现场保鲜/折叠/钳制/SSR),87 passed。
+
 ## 0.3.2
 
 第五轮对抗审查(三视角并行)后的加固:

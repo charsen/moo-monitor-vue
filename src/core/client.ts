@@ -32,6 +32,8 @@ export class MooClient {
   private patchedReplaceState?: History['replaceState']
   /** 打字聚合:同一元素的连续输入只记一条「输入 →」crumb(换元素 / 按 Enter/Escape 后重新计)。 */
   private lastInputEl: Element | null = null
+  /** fetch 轨迹折叠:连续同一请求(轮询)合成一条 ×N,不让 30 格轨迹被 fetch 刷满、挤掉交互上下文。 */
+  private lastFetch: { key: string; n: number } | null = null
   /** popstate(后退/前进)的 from 路径。 */
   private lastPath = ''
 
@@ -232,12 +234,13 @@ export class MooClient {
         return orig(...args).then(
           (res) => {
             if (!skip) {
-              this.addBreadcrumb({ category: 'fetch', level: res.ok ? 'info' : 'error', message: `${method} ${url} ${res.status}` })
+              this.fetchCrumb(`${method} ${url} ${res.status}`, res.ok ? 'info' : 'error')
               // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
-              // 丢弃 SDK 内部帧;指纹按 名称+消息(状态码/URL 里的 id 都会被归一)聚合。
+              // 丢弃 SDK 内部帧。指纹按 名称+消息 聚合 —— URL 去掉 query/hash 再进消息:
+              // 否则每个 query 组合一个指纹(轮询/搜索/游标场景),客户端合并失效 + 云端配额被刷爆。
               if (this.opts.httpErrorsMin !== null && res.status >= this.opts.httpErrorsMin) {
                 this.captureException(
-                  { name: 'HttpError', message: `${method} ${url} ${res.status}` },
+                  { name: 'HttpError', message: `${method} ${url.split(/[?#]/)[0]} ${res.status}` },
                   { handled: false, severity: 'error', extra: { status: res.status, method } },
                 )
               }
@@ -245,7 +248,7 @@ export class MooClient {
             return res
           },
           (err) => {
-            if (!skip) this.addBreadcrumb({ category: 'fetch', level: 'error', message: `${method} ${url} failed` })
+            if (!skip) this.fetchCrumb(`${method} ${url} failed`, 'error')
             throw err
           },
         )
@@ -293,6 +296,23 @@ export class MooClient {
 
     this.onPopstate = () => record(this.lastPath)
     window.addEventListener('popstate', this.onPopstate)
+  }
+
+  /**
+   * fetch 轨迹落格:与上一条比对,连续同一请求(同 method+url+status,典型轮询)原地折叠成
+   * 「… ×N」并刷新时间;中间插入过其他轨迹(点击/路由等)则正常另起一条,保持时序不乱。
+   */
+  private fetchCrumb(key: string, level: Breadcrumb['level']): void {
+    const last = this.crumbs.last()
+    if (this.lastFetch?.key === key && last && last.category === 'fetch') {
+      this.lastFetch.n++
+      last.message = `${key} ×${this.lastFetch.n}`
+      last.timestamp = Date.now()
+      if (level === 'error') last.level = 'error'
+      return
+    }
+    this.lastFetch = { key, n: 1 }
+    this.addBreadcrumb({ category: 'fetch', level, message: key })
   }
 
   private installFlushOnHide(): void {
