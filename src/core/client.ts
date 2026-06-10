@@ -142,9 +142,12 @@ export class MooClient {
   private installGlobalHandlers(): void {
     // 捕获阶段(true):既接 JS 运行时错误,也接资源加载错误(后者不冒泡,只能在捕获阶段拿)。
     this.onErrorEvt = (event: Event) => {
-      const target = event.target as (HTMLElement & { src?: string; href?: string }) | null
-      if (target && target !== (window as unknown as EventTarget) && target.tagName && (target.src || target.href)) {
-        const url = target.src || target.href
+      const target = event.target as (HTMLElement & { src?: unknown; href?: unknown }) | null
+      // SVG(<image>/<use>)的 href 是 SVGAnimatedString 对象而非字符串 → 取 baseVal,
+      // 否则消息变成 "[object SVGAnimatedString]",所有 SVG 资源失败被并成一条垃圾指纹。
+      const rawUrl = target ? (target.src ?? target.href) : null
+      const url = typeof rawUrl === 'string' ? rawUrl : ((rawUrl as { baseVal?: string } | null)?.baseVal ?? '')
+      if (target && target !== (window as unknown as EventTarget) && target.tagName && url) {
         this.addBreadcrumb({ category: 'resource', level: 'error', message: `资源加载失败: ${target.tagName} ${url}` })
         this.captureException(new Error(`Resource failed to load: ${url}`), {
           handled: false,
@@ -173,11 +176,16 @@ export class MooClient {
   private installBreadcrumbs(): void {
     // 点击:document 级捕获,解析「用户操作的元素」—— 就近交互祖先(点中 button 里的 span 也归到 button)
     // + 可读选择器 + aria/文本提示(见 dom.ts;输入控件绝不取值)。不存 DOM 引用。
+    // 整体 try/catch:轨迹手柄抛错会冒到 window.onerror 被 SDK 自己捕获成「宿主错误」(自噪音)。
     this.onClick = (e: Event) => {
-      const t = e.target as Element | null
-      if (!t || !t.tagName) return
-      this.lastInputEl = null // 点了别处,下一段输入重新记
-      this.addBreadcrumb({ category: 'click', message: describeElement(t) })
+      try {
+        const t = e.target as Element | null
+        if (!t || !t.tagName) return
+        this.lastInputEl = null // 点了别处,下一段输入重新记
+        this.addBreadcrumb({ category: 'click', message: describeElement(t) })
+      } catch (err) {
+        this.opts.onError?.(err)
+      }
     }
     window.addEventListener('click', this.onClick, true)
 
@@ -185,18 +193,24 @@ export class MooClient {
     //   ① Enter / Escape(提交、取消的关键节点);
     //   ② 可编辑元素上的「开始输入」(同一元素的连续打字聚合成一条,只记目标不记值)。
     this.onKeydown = (e: Event) => {
-      const ke = e as KeyboardEvent
-      const t = ke.target as Element | null
-      if (ke.key === 'Enter' || ke.key === 'Escape') {
-        this.lastInputEl = null
-        this.addBreadcrumb({ category: 'key', message: `${ke.key} → ${describeElement(t)}` })
-        return
-      }
-      if (ke.ctrlKey || ke.metaKey || ke.altKey) return // 快捷键不算输入
-      if (ke.key.length === 1 && t && t.tagName && isEditable(t)) {
-        if (this.lastInputEl === t) return
-        this.lastInputEl = t
-        this.addBreadcrumb({ category: 'input', message: `输入 → ${describeElement(t)}` })
+      try {
+        const ke = e as KeyboardEvent
+        // 扩展/测试工具会用普通 Event 派发 keydown(无 .key)→ 兜成空串,绝不抛。
+        const key = typeof ke.key === 'string' ? ke.key : ''
+        const t = ke.target as Element | null
+        if (key === 'Enter' || key === 'Escape') {
+          this.lastInputEl = null
+          this.addBreadcrumb({ category: 'key', message: `${key} → ${describeElement(t)}` })
+          return
+        }
+        if (ke.ctrlKey || ke.metaKey || ke.altKey) return // 快捷键不算输入
+        if (key.length === 1 && t && t.tagName && isEditable(t)) {
+          if (this.lastInputEl === t) return
+          this.lastInputEl = t
+          this.addBreadcrumb({ category: 'input', message: `输入 → ${describeElement(t)}` })
+        }
+      } catch (err) {
+        this.opts.onError?.(err)
       }
     }
     window.addEventListener('keydown', this.onKeydown, true)

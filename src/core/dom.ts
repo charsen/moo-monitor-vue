@@ -33,14 +33,40 @@ function isInputLike(el: Element): boolean {
   )
 }
 
-/** tag#id.前两个类 —— SVG 的 className 是 SVGAnimatedString(非 string)→ 跳过类名。 */
+/**
+ * tag#id.前两个类 —— SVG 的 className 是 SVGAnimatedString(非 string)→ 跳过类名;
+ * id 同理防 named-getter 劫持:<form> 内有 <input name="id"> 时 form.id 是那个元素而非字符串。
+ */
 function selectorOf(el: Element): string {
   let sel = el.tagName.toLowerCase()
-  if (el.id) sel += '#' + el.id
+  if (typeof el.id === 'string' && el.id) sel += '#' + el.id
   if (typeof el.className === 'string' && el.className.trim()) {
     sel += '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.')
   }
   return sel
+}
+
+/**
+ * 取首个非空文本片段(BFS,访问预算 12 节点、每层只展开前 6 个子节点,跳过 script/style)。
+ * 绝不读整棵子树的 textContent —— 点击 body 等大容器时那会把整页文本物化(CPU 尖刺 +
+ * 任意页面内容入轨迹),这里最多拿到浅层一小段再截 24 字符。
+ */
+function firstText(el: Element): string {
+  const queue: Node[] = [el]
+  let budget = 12
+  while (queue.length && budget-- > 0) {
+    const n = queue.shift()!
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = (n.nodeValue || '').trim()
+      if (t) return t.replace(/\s+/g, ' ').slice(0, 24)
+      continue
+    }
+    const tag = (n as Element).tagName
+    if (tag === 'SCRIPT' || tag === 'STYLE') continue
+    const kids = n.childNodes
+    for (let i = 0; i < kids.length && i < 6; i++) queue.push(kids[i])
+  }
+  return ''
 }
 
 /** 元素的人话提示:aria-label / title / name / placeholder / 可见文本(输入控件绝不取值)。 */
@@ -55,8 +81,8 @@ function hintOf(el: Element): string {
     const type = el.getAttribute?.('type')
     return type ? `[type=${type}]` : ''
   }
-  const text = (el.textContent || '').trim().replace(/\s+/g, ' ')
-  return text ? ` "${text.slice(0, 24)}"` : ''
+  const text = firstText(el)
+  return text ? ` "${text}"` : ''
 }
 
 /** 完整描述(先爬到交互元素再拼 选择器 + 提示),上限 120 字符。 */

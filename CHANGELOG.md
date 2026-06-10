@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2
+
+第五轮对抗审查(三视角并行)后的加固:
+
+- **keydown 自噪音**:扩展/测试工具用普通 Event 派发 keydown(无 `.key`)时,
+  `ke.key.length` 抛 TypeError → 冒到 window.onerror 被 SDK 自己捕获成「宿主错误」。
+  现 key 兜空串,点击/键盘两个轨迹手柄整体 try/catch(出错走 onError,绝不外抛)。
+- **大容器点击不再物化整页文本**:元素描述的文本提示改为 BFS 取浅层首段
+  (预算 12 节点、跳过 script/style),点击 body 不再把整页 textContent 序列化
+  (CPU 尖刺 + 任意页面内容入轨迹)。
+- **SVG 资源错误**:`<image>/<use>` 的 href 是 SVGAnimatedString 对象 → 取 baseVal,
+  不再产出 "[object SVGAnimatedString]" 垃圾指纹;选择器的 id 同步防 named-getter
+  劫持(form 内有 name="id" 的 input 时 form.id 不是字符串)。
+- 测试 +2(无 .key 不抛/不自捕获;大容器点击有界提取)。
+
 ## 0.3.1
 
 **采集面升级**:操作链路(点击/键盘/路由)、HTTP 错误捕获、会话自动化。

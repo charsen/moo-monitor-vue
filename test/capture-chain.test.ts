@@ -62,6 +62,29 @@ describe('点击 / 键盘 / 路由 行为链路', () => {
     expect(JSON.stringify(crumbs)).not.toContain('"s"') // 按键内容绝不出现
   })
 
+  it('非 KeyboardEvent 的 keydown(无 .key)不抛错、不产生自噪音错误', () => {
+    const { records, crumbsNow } = makeClient()
+    document.body.innerHTML = '<input name="q">'
+    // 扩展/测试工具常用普通 Event 派发 keydown —— 此前 ke.key.length 会抛 TypeError,
+    // 冒到 window.onerror 被 SDK 自己捕获成宿主错误。
+    document.querySelector('input')!.dispatchEvent(new Event('keydown', { bubbles: true }))
+
+    expect(crumbsNow().filter((b) => b.category === 'input' || b.category === 'key')).toHaveLength(0)
+    expect(records.filter((r) => r.error.message !== 'probe')).toHaveLength(0) // 无自捕获
+  })
+
+  it('点击大容器:只取浅层首段文本,不物化整页 textContent', () => {
+    const { crumbsNow } = makeClient()
+    document.body.innerHTML = `<div id="page"><script>const SECRET_JS = 1</script><p>页首标题文案比较长会被截断到二十四个字符以内的样子</p><p>${'正文'.repeat(5000)}</p></div>`
+    document.getElementById('page')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    const msg = crumbsNow().find((b) => b.category === 'click')?.message ?? ''
+    expect(msg).toContain('div#page')
+    expect(msg).not.toContain('SECRET_JS')        // script 内容不入轨迹
+    expect(msg.length).toBeLessThanOrEqual(120)   // 不携带整页文本
+    expect(msg).toContain('页首标题')              // 取到的是浅层首段
+  })
+
   it('快捷键(ctrl/meta)不算输入', () => {
     const { crumbsNow } = makeClient()
     document.body.innerHTML = '<input name="q">'
