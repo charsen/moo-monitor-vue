@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.4
+
+第七轮对抗审查 —— 修复 6 个问题:
+
+1. **captureMessage / 资源加载错误自带 SDK 内部栈**:SDK 里 new 出来的 Error 栈全是监控
+   代码自己,被当成出错位置且污染指纹。改传普通对象走合成栈路径(帧被丢弃),
+   name 也更语义化:`Message` / `ResourceError`(可按名过滤)。
+2. **指纹跨发版不稳定**:产物文件名带构建内容 hash(`index-DfA3k2Lz.js`),每次发版
+   全部错误换指纹 → 全量重新分组、首见(NEW)告警风暴、趋势/影响会话统计断裂。
+   指纹改用剥离 hash 段的稳定文件名(8~16 位段长,避开 -legacy/.min 语义后缀);
+   **云端 serverHash 同步修改(需配套部署),已有错误行的指纹会一次性轮换**。
+3. **iOS 上的 Chrome / Firefox 误判成 Safari**:CriOS / FxiOS UA 不含 Chrome//Firefox/,
+   此前落到 Safari 分支 —— 移动端浏览器分布统计失真。
+4. **Vue Router 错误双重捕获**:router.onError 捕获的同一个 Error 还会沿未 catch 的
+   push() 拒绝进 unhandledrejection → count 翻倍。插件捕获前打标(errorHandler 同),
+   rejection 手柄认标跳过(frozen 对象打不上标时退回双计,绝不抛错)。
+5. **重试记账与生命周期**:回收重试中的记录与新发生合并后是新对象,「已重试」标记
+   丢失 → 持续故障期间可无限重试,改为标记随合并延续;close() 清空
+   lastInputEl/lastFetch(微前端卸载不再滞留已脱离的 DOM 节点)。
+6. **setTag 值无界**:tags 随每条记录上报,一个超长值会把所有记录顶到截断线
+   (挤掉 stack/轨迹)。key 钳 64、value 钳 200。
+
+- 测试 +8(逐问题回归),95 passed。
+
 ## 0.3.3
 
 第六轮对抗审查(可靠投递专项)—— 修复 6 个问题:

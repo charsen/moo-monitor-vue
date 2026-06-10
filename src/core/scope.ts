@@ -11,7 +11,8 @@ export class Scope {
   }
 
   setTag(key: string, value: string): void {
-    this.tags[key] = value
+    // 钳制:tags 随【每条】记录上报,一个超长值会把所有记录顶到截断线(挤掉 stack/轨迹)。
+    this.tags[String(key).slice(0, 64)] = String(value).slice(0, 200)
   }
 
   setExtra(key: string, value: unknown): void {

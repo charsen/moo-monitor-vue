@@ -9,6 +9,14 @@ export function parseUA(ua: string): { browser?: string; browser_version?: strin
   } else if ((m = /OPR\/([\d.]+)/.exec(ua)) || (m = /Opera[/ ]([\d.]+)/.exec(ua))) {
     res.browser = 'Opera'
     res.browser_version = m[1]
+  } else if ((m = /CriOS\/([\d.]+)/.exec(ua))) {
+    // iOS 上的 Chrome / Firefox 用 CriOS / FxiOS 标识(UA 不含 Chrome/ Firefox/),
+    // 此前落到 Version/x Safari 分支被误判成 Safari。
+    res.browser = 'Chrome'
+    res.browser_version = m[1]
+  } else if ((m = /FxiOS\/([\d.]+)/.exec(ua))) {
+    res.browser = 'Firefox'
+    res.browser_version = m[1]
   } else if ((m = /Firefox\/([\d.]+)/.exec(ua))) {
     res.browser = 'Firefox'
     res.browser_version = m[1]

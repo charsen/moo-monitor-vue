@@ -25,8 +25,21 @@ export const MooMonitor: Plugin = {
 
     const prev = app.config.errorHandler
 
+    // 双重捕获防护:router.onError 捕获的同一个 Error,还会沿未被 catch 的 push() 拒绝
+    // 进 unhandledrejection → count 翻倍。捕获前打标,client 的 rejection 手柄认标跳过。
+    const mark = (err: unknown) => {
+      if (err && typeof err === 'object') {
+        try {
+          ;(err as Record<string, unknown>).__mooSeen = true
+        } catch {
+          /* frozen 对象打不上标:最坏退回双计,不能因此抛错 */
+        }
+      }
+    }
+
     // Vue Router 懒加载 chunk 失败不进 errorHandler / window.onerror,单独接 router.onError。
     options.router?.onError((err: unknown) => {
+      mark(err)
       client.captureException(err, { handled: false, severity: 'error', extra: { source: 'router' } })
     })
 
@@ -37,6 +50,7 @@ export const MooMonitor: Plugin = {
         $?: { type?: { name?: string; __name?: string } }
       } | null
       const name = inst?.$options?.name || inst?.$?.type?.__name || inst?.$?.type?.name
+      mark(err) // 异步 setup 错误可能同时进 errorHandler 与 unhandledrejection,同样防双计
       client.captureException(err, { handled: false, severity: 'error', extra: { vueInfo: info, component: name } })
       if (typeof prev === 'function') {
         prev(err, instance as never, info)

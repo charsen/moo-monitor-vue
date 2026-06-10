@@ -40,6 +40,15 @@ export function toError(input: unknown): Error {
 }
 
 /**
+ * 指纹用的稳定文件名:剥掉构建器的内容 hash 段(index-DfA3k2Lz.js → index.js)——
+ * 否则每次发版产物名全换,所有错误的指纹跟着换 → 全量重新分组、首见(NEW)告警风暴、
+ * 趋势/影响会话统计从零开始。8~16 位段长避开 -legacy/.min 这类语义后缀。
+ */
+function stableFile(file?: string): string {
+  return (file || '?').replace(/[-.][A-Za-z0-9_-]{8,16}(?=\.m?js\b)/, '')
+}
+
+/**
  * 客户端指纹:类型 + 规整后的消息 + 栈顶 3 帧(file:function)。
  * 只抹平易变部分(数字 / 十六进制地址 / 长 id / 空白),【保留】引号内的属性名等区分信息
  * —— 否则 'reading "id"' 与 'reading "name"' 会被聚成一类(审查发现)。
@@ -47,7 +56,7 @@ export function toError(input: unknown): Error {
 function fingerprint(name: string, message: string, frames: StackFrame[]): string {
   const top = frames
     .slice(0, 3)
-    .map((f) => `${f.file || '?'}:${f.function || '?'}`)
+    .map((f) => `${stableFile(f.file)}:${f.function || '?'}`)
     .join('|')
   const norm = message
     .replace(/0x[0-9a-f]+/gi, '0xN')

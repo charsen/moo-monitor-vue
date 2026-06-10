@@ -69,6 +69,9 @@ export class Queue {
     if (idx !== -1) {
       const existing = this.buf[idx]
       const merged: FrontendErrorRecord = { ...record }
+      // 「已重试」标记随合并延续:回收中的记录和新发生合并后是个新对象,
+      // 不延续标记的话持续故障期间同一记录可被无限回收重试。
+      if (this.retried.has(existing)) this.retried.add(merged)
       merged.count = (existing.count ?? 1) + (record.count ?? 1)
       // last_seen 取「最新」、first_seen 取「最早」—— 防乱序 / beforeSend 改写时间导致回退。
       merged.last_seen =

@@ -83,7 +83,9 @@ export class MooClient {
   }
 
   captureMessage(message: string, level: Breadcrumb['level'] = 'info'): void {
-    this.captureException(new Error(message), { handled: true, severity: level || 'info' })
+    // 传普通对象而非 new Error:SDK 里 new 出来的 Error 栈全是监控代码自己(captureMessage→
+    // captureException→bundle 内部帧),会被当成出错位置且污染指纹 —— 对象走合成栈路径,帧被丢弃。
+    this.captureException({ name: 'Message', message }, { handled: true, severity: level || 'info' })
   }
 
   setUser(user: MooUser | null): void {
@@ -124,6 +126,8 @@ export class MooClient {
     }
     this.installed = false
     this.opts.enabled = false // 关闭后不再捕获
+    this.lastInputEl = null // 释放 DOM 引用(微前端卸载后不滞留已脱离的节点)
+    this.lastFetch = null
     return ok
   }
 
@@ -151,11 +155,11 @@ export class MooClient {
       const url = typeof rawUrl === 'string' ? rawUrl : ((rawUrl as { baseVal?: string } | null)?.baseVal ?? '')
       if (target && target !== (window as unknown as EventTarget) && target.tagName && url) {
         this.addBreadcrumb({ category: 'resource', level: 'error', message: `资源加载失败: ${target.tagName} ${url}` })
-        this.captureException(new Error(`Resource failed to load: ${url}`), {
-          handled: false,
-          severity: 'warning',
-          extra: { tag: target.tagName },
-        })
+        // 同 captureMessage:对象走合成栈路径,不带 SDK 内部帧;name 也更语义化(可按 ResourceError 过滤)。
+        this.captureException(
+          { name: 'ResourceError', message: `Resource failed to load: ${url}` },
+          { handled: false, severity: 'warning', extra: { tag: target.tagName } },
+        )
         return
       }
       const e = event as ErrorEvent
@@ -170,6 +174,9 @@ export class MooClient {
 
     this.onRejection = (event: Event) => {
       const reason = (event as PromiseRejectionEvent).reason
+      // Vue Router 的导航错误会同时进 router.onError(插件已捕获并打标)和这里(未被 catch 的
+      // push() 拒绝)—— 同一个 Error 捕两次 → count 翻倍。打过标的跳过。
+      if (reason && typeof reason === 'object' && (reason as { __mooSeen?: boolean }).__mooSeen) return
       this.captureException(reason ?? 'Unhandled promise rejection', { handled: false, severity: 'error' })
     }
     window.addEventListener('unhandledrejection', this.onRejection)
