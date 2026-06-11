@@ -258,18 +258,26 @@ describe('beforeSend(补测试缺口)', () => {
 })
 
 describe('轨迹源码化(0.3.10)', () => {
-  it('点击/输入轨迹带所属 Vue 组件名(__vueParentComponent 反查)', () => {
+  it('点击/输入轨迹带所属 Vue 组件名:跳过 UI 库组件(AInput 等),取业务组件', () => {
     const { crumbsNow } = makeClient()
     document.body.innerHTML = '<div id="form"><button id="login">登录</button></div>'
     const btn = document.getElementById('login')!
-    // 模拟 Vue 3 挂载:宿主元素带 __vueParentComponent,组件链上有名字
+    // 模拟 ant-design 实例链:AButton(库组件)→ 无名 → LoginForm(业务)
     ;(document.getElementById('form') as never as Record<string, unknown>).__vueParentComponent = {
-      type: {}, parent: { type: { __name: 'LoginForm' } },
+      type: { name: 'AButton' }, parent: { type: {}, parent: { type: { __name: 'LoginForm' } } },
     }
     btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
 
     const click = crumbsNow().find((b) => b.category === 'click')
-    expect(click?.message).toBe('button#login "登录" · LoginForm')
+    expect(click?.message).toBe('button#login "登录" · LoginForm') // 不是 AButton
+
+    // 链上全是库组件:回退首个有名字的(有总比没有强)
+    document.body.innerHTML = '<button id="b2">B</button>'
+    ;(document.getElementById('b2') as never as Record<string, unknown>).__vueParentComponent = {
+      type: { name: 'ElButton' }, parent: { type: { name: 'ElForm' } },
+    }
+    document.getElementById('b2')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(crumbsNow().filter((b) => b.category === 'click').pop()?.message).toContain('· ElButton')
   })
 
   it('失败 fetch 的轨迹携带发起方调用帧(data.frame);成功请求不采', async () => {
@@ -281,7 +289,11 @@ describe('轨迹源码化(0.3.10)', () => {
 
     const fail = crumbsNow().find((b) => b.category === 'fetch')
     expect(fail?.data?.frame).toBeTruthy()
-    expect((fail?.data?.frame as { file?: string }).file).toBeTruthy() // best-effort 调用帧
+    const file = (fail?.data?.frame as { file?: string }).file
+    expect(file).toBeTruthy()
+    // 关键:帧来自 fetch【调用时】同步留存的栈(微任务回调里业务调用方已不在栈上),
+    // 调用方是本测试文件 → 帧文件应指向 test 而非 SDK 源码
+    expect(file).not.toContain('/src/core/')
 
     vi.stubGlobal('fetch', mk(200))
     const { crumbsNow: ok } = makeClient({ httpErrors: false })

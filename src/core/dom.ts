@@ -94,24 +94,36 @@ export function describeElement(el: Element | null): string {
 
 type VueInstance = { type?: { name?: string; __name?: string }; parent?: VueInstance | null }
 
+// 常见 UI 组件库的命名前缀(AntD 的 AInput / Element 的 ElButton / Vant / Naive / Quasar / TDesign…):
+// 从 input 这类元素反查,实例链上首个有名字的几乎总是库组件 —— 标 `· AInput` 毫无信息量,
+// 要的是用户自己的业务组件(LoginForm)。命中前缀则继续向上找。
+const UI_LIB_NAME = /^(A|El|Van|N|Q|T|Lay|Prime|Ion|Arco)[A-Z]/
+
 /**
- * 从 DOM 元素反查所属 Vue 组件名(轨迹「源码化」第一层):Vue 3 在宿主元素上挂
- * __vueParentComponent,沿实例链向上取第一个有名字的组件 —— 组件名是编译期注入的
- * 字符串字面量,生产压缩也保留。非 Vue 区域 / 函数式匿名组件返回 undefined。
+ * 从 DOM 元素反查所属 Vue 组件名(轨迹「源码化」第一层):Vue 3 在组件宿主元素上挂
+ * __vueParentComponent,沿实例链向上取第一个【业务】组件名(跳过 UI 库组件;
+ * 全是库组件时回退首个有名字的)。组件名是编译期注入的字符串字面量,生产压缩也保留。
+ * 非 Vue 区域 / 函数式匿名组件返回 undefined。
  */
 export function vueComponentName(el: Element | null): string | undefined {
   try {
     let cur: Element | null = el
-    for (let i = 0; cur && i < 8; i++) {
+    for (let i = 0; cur && i < 24; i++) {
+      // ant-design 等库从 input 到组件宿主常隔多层包装,DOM 爬升要够深
       const inst = (cur as Element & { __vueParentComponent?: VueInstance }).__vueParentComponent
       if (inst) {
+        let firstNamed: string | undefined
         let c: VueInstance | null | undefined = inst
-        for (let j = 0; c && j < 12; j++) {
+        for (let j = 0; c && j < 20; j++) {
           const n = c.type?.name || c.type?.__name
-          if (n) return String(n).slice(0, 40)
+          if (n) {
+            const name = String(n).slice(0, 40)
+            if (!UI_LIB_NAME.test(name)) return name
+            firstNamed ??= name
+          }
           c = c.parent
         }
-        return undefined
+        return firstNamed // 全是库组件:有总比没有强
       }
       cur = cur.parentElement
     }

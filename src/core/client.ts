@@ -241,10 +241,13 @@ export class MooClient {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request)?.url
         const method = (args[1]?.method || (input as Request)?.method || 'GET').toUpperCase()
         const skip = !url || url.indexOf(self) !== -1
+        // 调用栈须在【此刻】同步留存(仅一行栈字符串,微秒级):响应回调跑在微任务里,
+        // 那时栈上只剩 SDK 自己,业务调用方早已不在 —— 在回调里采帧会把「发起于」指向 SDK。
+        const callStack = skip ? undefined : new Error().stack
         return orig(...args).then(
           (res) => {
             if (!skip) {
-              this.fetchCrumb(`${method} ${url} ${res.status}`, res.ok ? 'info' : 'error')
+              this.fetchCrumb(`${method} ${url} ${res.status}`, res.ok ? 'info' : 'error', callStack)
               // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
               // 丢弃 SDK 内部帧。指纹按 名称+消息 聚合 —— URL 去掉 query/hash 再进消息:
               // 否则每个 query 组合一个指纹(轮询/搜索/游标场景),客户端合并失效 + 云端配额被刷爆。
@@ -258,7 +261,7 @@ export class MooClient {
             return res
           },
           (err) => {
-            if (!skip) this.fetchCrumb(`${method} ${url} failed`, 'error')
+            if (!skip) this.fetchCrumb(`${method} ${url} failed`, 'error', callStack)
             throw err
           },
         )
@@ -323,7 +326,7 @@ export class MooClient {
    * 失败请求(level=error)附带发起方调用帧(data.frame,含 debug_id)——
    * 云端在还原栈帧的同一遍解析里把它还原成「发起于 src/api/login.ts:42」。
    */
-  private fetchCrumb(key: string, level: Breadcrumb['level']): void {
+  private fetchCrumb(key: string, level: Breadcrumb['level'], callStack?: string): void {
     if (key.length > 280) key = key.slice(0, 280) + '…' // data: 巨串 URL;折叠路径直接改写 message,须在此截
     const last = this.crumbs.last()
     if (this.lastFetch?.key === key && last && last.category === 'fetch') {
@@ -336,21 +339,22 @@ export class MooClient {
     this.lastFetch = { key, n: 1 }
     const crumb: Breadcrumb = { category: 'fetch', level, message: key }
     if (level === 'error') {
-      const frame = this.callerFrame()
+      const frame = this.callerFrame(callStack)
       if (frame) crumb.data = { frame }
     }
     this.addBreadcrumb(crumb)
   }
 
   /**
-   * 失败 fetch 的发起方调用帧(best-effort):此处栈形如
-   * [callerFrame, fetchCrumb, patched-fetch-then, ...业务调用链],跳过 SDK 头部取业务帧。
-   * 打包内联可能让头部帧数变化 → 取不准时退化为栈底帧;仅失败请求才采,成本可忽略。
+   * 失败 fetch 的发起方调用帧:解析 patched fetch【调用时】同步留存的栈
+   * (栈形如 [patched-fetch 自身, 业务调用方, ...] → 取第 2 帧),失败请求才解析。
+   * 绝不能在响应回调里现采 —— 微任务栈上没有业务调用方。
    */
-  private callerFrame(): { file?: string; line?: number; column?: number; debug_id?: string } | undefined {
+  private callerFrame(callStack?: string): { file?: string; line?: number; column?: number; debug_id?: string } | undefined {
     try {
-      const frames = parseStack(new Error().stack)
-      const f = frames[3] ?? frames[frames.length - 1]
+      if (!callStack) return undefined
+      const frames = parseStack(callStack)
+      const f = frames[1] ?? frames[0]
       if (!f?.file || f.file === 'native' || f.file === 'eval') return undefined
       return { file: scrub(f.file), line: f.line, column: f.column, debug_id: debugIdForFile(f.file) }
     } catch {
