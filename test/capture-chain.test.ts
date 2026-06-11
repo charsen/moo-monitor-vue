@@ -301,3 +301,57 @@ describe('轨迹源码化(0.3.10)', () => {
     expect(ok().find((b) => b.category === 'fetch')?.data).toBeUndefined() // 成功请求零成本
   })
 })
+
+describe('XHR 插桩与请求忽略名单(0.3.12)', () => {
+  it('axios 走的 XHR 也进轨迹并触发 HttpError;close() 还原原型', async () => {
+    // 桩掉原生 send(jsdom 会真发网络):模拟 504 响应
+    const origOpen = XMLHttpRequest.prototype.open
+    const origSend = XMLHttpRequest.prototype.send
+    XMLHttpRequest.prototype.send = function () {
+      setTimeout(() => {
+        Object.defineProperty(this, 'status', { value: 504, configurable: true })
+        this.dispatchEvent(new Event('loadend'))
+      }, 0)
+    }
+
+    const { client, records, crumbsNow } = makeClient()
+    const xhr = new XMLHttpRequest()
+    xhr.open('post', 'https://api.test/login')
+    xhr.send()
+    await new Promise((r) => setTimeout(r, 5))
+
+    const crumb = crumbsNow().find((b) => b.category === 'fetch')
+    expect(crumb?.message).toBe('POST https://api.test/login 504')
+    expect(crumb?.data?.frames).toBeTruthy() // 发起候选帧(send 时同步采)
+    expect(records.find((r) => r.error.name === 'HttpError')?.error.message).toBe('POST https://api.test/login 504')
+
+    client.close()
+    expect(XMLHttpRequest.prototype.open).toBe(origOpen) // 还原
+    XMLHttpRequest.prototype.send = origSend
+  })
+
+  it('第三方统计 URL 默认忽略(GA 不再刷屏轨迹);传 [] 可保留', async () => {
+    const mk = () => vi.fn(() => Promise.resolve({ ok: true, status: 200 } as Response))
+    vi.stubGlobal('fetch', mk())
+    const { crumbsNow } = makeClient()
+    await window.fetch('https://www.google-analytics.com/g/collect?v=2&tid=G-XXX')
+    await window.fetch('https://hm.baidu.com/hm.js?abc')
+    expect(crumbsNow().filter((b) => b.category === 'fetch')).toHaveLength(0) // 统计请求不进轨迹
+
+    vi.stubGlobal('fetch', mk())
+    const { crumbsNow: keep } = makeClient({ ignoreFetchUrls: [] })
+    await window.fetch('https://www.google-analytics.com/g/collect?v=2')
+    expect(keep().filter((b) => b.category === 'fetch')).toHaveLength(1) // 显式关闭忽略
+  })
+
+  it('失败请求携带前 3 个候选帧(封装层之外还能取到更上层)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 504 } as Response)))
+    const { crumbsNow } = makeClient({ httpErrors: false })
+    await window.fetch('https://api.test/x')
+
+    const frames = crumbsNow().find((b) => b.category === 'fetch')?.data?.frames as unknown[]
+    expect(Array.isArray(frames)).toBe(true)
+    expect(frames.length).toBeGreaterThanOrEqual(1)
+    expect(frames.length).toBeLessThanOrEqual(3)
+  })
+})

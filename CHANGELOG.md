@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.12
+
+sourcemap × 行为轨迹 对抗自审 —— 修复 3 个问题:
+
+1. **XHR 未插桩(大洞)**:axios 在浏览器默认走 XMLHttpRequest —— 此前 axios 应用
+   (国内 Vue 项目主流)的 API 请求完全不进轨迹、HTTP ≥500 不捕获、发起帧缺失,
+   轨迹里只剩第三方统计的 fetch。补 XHR 插桩(open 记 method/url、send 同步留存
+   调用栈、loadend 统一落格;status 0 = 网络失败只记轨迹),与 fetch 共用
+   落格/捕获/采帧/折叠逻辑;哨兵防叠包,close() 还原原型。
+2. **发起帧永远指向请求封装层**:几乎所有项目都有 request() 封装,单帧候选常年
+   命中封装文件同一行。改为携带前 3 个候选帧(data.frames,兼容旧 data.frame),
+   云端按序还原、取第一个源路径不含 node_modules/ 的业务帧。
+3. **第三方统计请求刷屏轨迹**:GA/GTM 每次 URL 都不同,折叠救不了,30 格轨迹被
+   刷满、用户操作被淹没。新增 ignoreFetchUrls 选项,默认内置常见统计域名
+   (GA/GTM/doubleclick/clarity/百度统计/CNZZ/友盟/神策/GrowingIO),
+   不进轨迹也不触发 HttpError;传 [] 全保留。
+
+- 测试 +3(XHR 全链路与还原原型 / 忽略名单与关闭 / 多候选帧),119 passed;
+  云端配套(候选帧择优,无迁移)。
+
 ## 0.3.11
 
 轨迹源码化(0.3.10)对抗自审 —— 修复 3 个问题:

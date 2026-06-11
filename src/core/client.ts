@@ -29,6 +29,10 @@ export class MooClient {
   private onPagehide?: () => void
   private origFetch?: typeof fetch
   private patchedFetch?: AnyFetch
+  private origXhrOpen?: typeof XMLHttpRequest.prototype.open
+  private origXhrSend?: typeof XMLHttpRequest.prototype.send
+  private patchedXhrOpen?: typeof XMLHttpRequest.prototype.open
+  private patchedXhrSend?: typeof XMLHttpRequest.prototype.send
   private origPushState?: History['pushState']
   private origReplaceState?: History['replaceState']
   private patchedPushState?: History['pushState']
@@ -126,6 +130,10 @@ export class MooClient {
       if (this.origFetch && (window.fetch as AnyFetch) === this.patchedFetch) window.fetch = this.origFetch
       if (this.origPushState && window.history.pushState === this.patchedPushState) window.history.pushState = this.origPushState
       if (this.origReplaceState && window.history.replaceState === this.patchedReplaceState) window.history.replaceState = this.origReplaceState
+      if (typeof XMLHttpRequest !== 'undefined') {
+        if (this.origXhrOpen && XMLHttpRequest.prototype.open === this.patchedXhrOpen) XMLHttpRequest.prototype.open = this.origXhrOpen
+        if (this.origXhrSend && XMLHttpRequest.prototype.send === this.patchedXhrSend) XMLHttpRequest.prototype.send = this.origXhrSend
+      }
     }
     this.installed = false
     this.opts.enabled = false // 关闭后不再捕获
@@ -228,6 +236,7 @@ export class MooClient {
     window.addEventListener('keydown', this.onKeydown, true)
 
     this.installNavigationBreadcrumbs()
+    this.installXhrBreadcrumbs()
 
     // fetch:记录 method/url/status 作 breadcrumb;排除上报自身 URL,防死循环。
     // 哨兵 __mooPatched 防重复 init() 叠加包裹(否则每层各记一条 breadcrumb)。
@@ -240,28 +249,17 @@ export class MooClient {
         const input = args[0]
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request)?.url
         const method = (args[1]?.method || (input as Request)?.method || 'GET').toUpperCase()
-        const skip = !url || url.indexOf(self) !== -1
+        const skip = !url || url.indexOf(self) !== -1 || this.isIgnoredFetchUrl(url)
         // 调用栈须在【此刻】同步留存(仅一行栈字符串,微秒级):响应回调跑在微任务里,
         // 那时栈上只剩 SDK 自己,业务调用方早已不在 —— 在回调里采帧会把「发起于」指向 SDK。
         const callStack = skip ? undefined : new Error().stack
         return orig(...args).then(
           (res) => {
-            if (!skip) {
-              this.fetchCrumb(`${method} ${url} ${res.status}`, res.ok ? 'info' : 'error', callStack)
-              // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
-              // 丢弃 SDK 内部帧。指纹按 名称+消息 聚合 —— URL 去掉 query/hash 再进消息:
-              // 否则每个 query 组合一个指纹(轮询/搜索/游标场景),客户端合并失效 + 云端配额被刷爆。
-              if (this.opts.httpErrorsMin !== null && res.status >= this.opts.httpErrorsMin) {
-                this.captureException(
-                  { name: 'HttpError', message: `${method} ${url.split(/[?#]/)[0]} ${res.status}` },
-                  { handled: false, severity: 'error', extra: { status: res.status, method } },
-                )
-              }
-            }
+            if (!skip) this.httpCrumb(method, url, res.status, callStack)
             return res
           },
           (err) => {
-            if (!skip) this.fetchCrumb(`${method} ${url} failed`, 'error', callStack)
+            if (!skip) this.httpCrumb(method, url, 'failed', callStack)
             throw err
           },
         )
@@ -314,6 +312,83 @@ export class MooClient {
     window.addEventListener('popstate', this.onPopstate)
   }
 
+  /**
+   * XHR 插桩:axios 在浏览器默认走 XMLHttpRequest 而非 fetch —— 不包它的话,
+   * axios 应用(国内 Vue 项目主流)的 API 请求完全不进轨迹、HTTP 错误捕获也不生效。
+   * open 记 method/url,send 同步留存调用栈,loadend 统一落格(status 0 = 网络失败/中断)。
+   */
+  private installXhrBreadcrumbs(): void {
+    if (typeof XMLHttpRequest === 'undefined') return
+    type PatchedFn = ((...args: never[]) => unknown) & { __mooPatched?: boolean }
+    const proto = XMLHttpRequest.prototype
+    if ((proto.open as PatchedFn).__mooPatched) return // 哨兵:重复 init 不叠包
+
+    this.origXhrOpen = proto.open
+    this.origXhrSend = proto.send
+    const client = this
+    const intake = this.intakeUrl
+    type MooXhr = XMLHttpRequest & { __moo?: { method: string; url: string; stack?: string } }
+
+    const open = function (this: MooXhr, ...args: Parameters<XMLHttpRequest['open']>) {
+      try {
+        this.__moo = { method: String(args[0] || 'GET').toUpperCase(), url: String(args[1] ?? '') }
+      } catch {
+        /* 记录失败不影响请求本体 */
+      }
+      return client.origXhrOpen!.apply(this, args)
+    } as typeof proto.open & { __mooPatched?: boolean }
+    open.__mooPatched = true
+
+    const send = function (this: MooXhr, ...args: Parameters<XMLHttpRequest['send']>) {
+      try {
+        const meta = this.__moo
+        if (meta && meta.url && meta.url.indexOf(intake) === -1 && !client.isIgnoredFetchUrl(meta.url)) {
+          meta.stack = new Error().stack // 同步留存:loadend 回调里业务调用方已不在栈上
+          this.addEventListener('loadend', () => {
+            try {
+              client.httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
+            } catch (e) {
+              client.opts.onError?.(e)
+            }
+          })
+        }
+      } catch (e) {
+        client.opts.onError?.(e)
+      }
+      return client.origXhrSend!.apply(this, args)
+    } as typeof proto.send & { __mooPatched?: boolean }
+    send.__mooPatched = true
+
+    this.patchedXhrOpen = proto.open = open
+    this.patchedXhrSend = proto.send = send
+  }
+
+  /** 请求 URL 是否在忽略名单(第三方统计等:不进轨迹、不触发 HttpError)。 */
+  private isIgnoredFetchUrl(url: string): boolean {
+    for (const p of this.opts.ignoreFetchUrls) {
+      if (typeof p === 'string' ? url.indexOf(p) !== -1 : p.test(url)) return true
+    }
+    return false
+  }
+
+  /**
+   * HTTP 请求统一落格(fetch 与 XHR 共用):轨迹 + ≥httpErrorsMin 的 HttpError 捕获。
+   * status='failed'/0 = 网络失败/中断,只记轨迹不计 HttpError(离线噪音)。
+   */
+  private httpCrumb(method: string, url: string, status: number | 'failed', callStack?: string): void {
+    const failed = status === 'failed' || status === 0
+    this.fetchCrumb(`${method} ${url} ${failed ? 'failed' : status}`, failed || (status as number) >= 400 ? 'error' : 'info', callStack)
+    // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
+    // 丢弃 SDK 内部帧。指纹按 名称+消息 聚合 —— URL 去掉 query/hash 再进消息:
+    // 否则每个 query 组合一个指纹(轮询/搜索/游标场景),客户端合并失效 + 云端配额被刷爆。
+    if (!failed && this.opts.httpErrorsMin !== null && (status as number) >= this.opts.httpErrorsMin) {
+      this.captureException(
+        { name: 'HttpError', message: `${method} ${url.split(/[?#]/)[0]} ${status}` },
+        { handled: false, severity: 'error', extra: { status, method } },
+      )
+    }
+  }
+
   /** 元素描述 + 所属 Vue 组件名(轨迹「源码化」第一层:`button.ant-btn "登录" · LoginForm`)。 */
   private describeWithComponent(t: Element | null): string {
     const comp = vueComponentName(t)
@@ -339,26 +414,30 @@ export class MooClient {
     this.lastFetch = { key, n: 1 }
     const crumb: Breadcrumb = { category: 'fetch', level, message: key }
     if (level === 'error') {
-      const frame = this.callerFrame(callStack)
-      if (frame) crumb.data = { frame }
+      const frames = this.callerFrames(callStack)
+      if (frames.length) crumb.data = { frame: frames[0], frames }
     }
     this.addBreadcrumb(crumb)
   }
 
   /**
-   * 失败 fetch 的发起方调用帧:解析 patched fetch【调用时】同步留存的栈
-   * (栈形如 [patched-fetch 自身, 业务调用方, ...] → 取第 2 帧),失败请求才解析。
+   * 失败请求的发起方候选帧(前 3 个):解析请求【调用时】同步留存的栈
+   * (栈形如 [patched 自身, 调用方, 再上层…] → 跳过补丁取后续帧)。
+   * 带多个候选是因为几乎所有项目都有 request() 封装 —— 第一帧常年指向封装文件
+   * 同一行,云端按序还原并取第一个源路径不含 node_modules/ 的业务帧。
    * 绝不能在响应回调里现采 —— 微任务栈上没有业务调用方。
    */
-  private callerFrame(callStack?: string): { file?: string; line?: number; column?: number; debug_id?: string } | undefined {
+  private callerFrames(callStack?: string): { file?: string; line?: number; column?: number; debug_id?: string }[] {
     try {
-      if (!callStack) return undefined
-      const frames = parseStack(callStack)
-      const f = frames[1] ?? frames[0]
-      if (!f?.file || f.file === 'native' || f.file === 'eval') return undefined
-      return { file: scrub(f.file), line: f.line, column: f.column, debug_id: debugIdForFile(f.file) }
+      if (!callStack) return []
+      const out: { file?: string; line?: number; column?: number; debug_id?: string }[] = []
+      for (const f of parseStack(callStack).slice(1, 4)) {
+        if (!f?.file || f.file === 'native' || f.file === 'eval') continue
+        out.push({ file: scrub(f.file), line: f.line, column: f.column, debug_id: debugIdForFile(f.file) })
+      }
+      return out
     } catch {
-      return undefined
+      return []
     }
   }
 

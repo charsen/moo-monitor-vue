@@ -91,6 +91,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `autoSession` | `true` | 自动生成会话 ID(sessionStorage,标签页生命周期);`setUser({ sessionId })` 优先 |
 | `httpErrors` | `true` | fetch 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭 |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
+| `ignoreFetchUrls` | 内置统计域名 | 请求轨迹忽略名单(GA/GTM/百度统计/友盟/神策等默认忽略,传 `[]` 全保留) |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |
 | `onError` | — | SDK 自身错误 / 丢弃回执回调(默认静默,绝不抛回宿主) |
 
@@ -119,7 +120,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 2. 未处理的 Promise 拒绝 —— `unhandledrejection`
 3. Vue 组件错误 —— `app.config.errorHandler`(渲染/生命周期/watch,这些不冒泡到 `onerror`,故单独接)
 4. 资源加载失败 —— 捕获阶段 error 事件(img/script/css 404 等,记为 `warning`)
-5. HTTP 响应错误 —— 经包裹的 fetch,状态码 ≥500(可调 / 可关)记为 `HttpError`
+5. HTTP 响应错误 —— 经包裹的 fetch **与 XMLHttpRequest(axios)**,状态码 ≥500(可调 / 可关)记为 `HttpError`
 6. 手动上报 —— `captureException(e)` / `captureMessage('…')`
 
 > 不会上报:正常接口请求、性能指标(FCP/LCP…)、用户行为本身、页面录屏 —— 均不在 v1 范围(见[路线图](#路线图))。

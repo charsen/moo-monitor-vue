@@ -98,6 +98,12 @@ export interface MooOptions {
   httpErrors?: boolean | { min?: number }
   /** 噪音过滤:消息命中即丢弃(字符串包含或正则匹配)。 */
   ignoreErrors?: (string | RegExp)[]
+  /**
+   * 请求轨迹忽略名单(URL 包含字符串或正则命中即不记轨迹、不触发 HttpError)。
+   * 默认内置常见第三方统计域名(GA/GTM/百度统计/友盟/神策/clarity 等)——
+   * 它们每次 URL 都不同、折叠救不了,会把用户操作淹没在轨迹里;传 [] 可全部保留。
+   */
+  ignoreFetchUrls?: (string | RegExp)[]
   /** 发送前钩子:返回 null 丢弃,可改写记录(脱敏 / 加字段)。 */
   beforeSend?: (event: FrontendErrorRecord) => FrontendErrorRecord | null
   /** SDK 自身错误回调(默认静默,绝不抛回宿主)。 */
@@ -122,9 +128,16 @@ export interface ResolvedOptions {
   /** HTTP 错误捕获阈值;null = 关闭。 */
   httpErrorsMin: number | null
   ignoreErrors: (string | RegExp)[]
+  ignoreFetchUrls: (string | RegExp)[]
   beforeSend?: (event: FrontendErrorRecord) => FrontendErrorRecord | null
   onError?: (err: unknown) => void
 }
+
+/** 常见第三方统计/广告域名:每次请求 URL 都不同(payload 在 query),会刷满 30 格轨迹。 */
+export const DEFAULT_IGNORE_FETCH_URLS: (string | RegExp)[] = [
+  'google-analytics.com', 'googletagmanager.com', 'doubleclick.net', 'clarity.ms',
+  'hm.baidu.com', 'cnzz.com', 'umeng.com', 'sensorsdata', 'growingio.com',
+]
 
 export function resolveOptions(o: MooOptions): ResolvedOptions {
   return {
@@ -145,6 +158,7 @@ export function resolveOptions(o: MooOptions): ResolvedOptions {
     // 阈值钳到 ≥400:min:0 之类会把所有 2xx 也捕成 HttpError,免费档配额瞬间被刷光。
     httpErrorsMin: o.httpErrors === false ? null : o.httpErrors === true || o.httpErrors == null ? 500 : Math.max(o.httpErrors.min ?? 500, 400),
     ignoreErrors: o.ignoreErrors ?? [],
+    ignoreFetchUrls: o.ignoreFetchUrls ?? DEFAULT_IGNORE_FETCH_URLS,
     beforeSend: o.beforeSend,
     onError: o.onError,
   }
