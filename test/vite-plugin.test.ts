@@ -120,3 +120,51 @@ describe('mooSourcemapUpload', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () => {
+  const okResp = () => new Response(JSON.stringify({ ok: true, saved: 1, skipped: 0, errors: {}, finalize_eta_seconds: 125 }), { status: 200 })
+
+  it('分块受累计字节约束:两个 4MB map 拆成两个请求(防撞 post_max_size)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-bytes-'))
+    const bundle: Record<string, unknown> = {}
+    for (const n of ['big1.js.map', 'big2.js.map', 'tiny.js.map']) {
+      await writeFile(join(dir, n), n.startsWith('big') ? 'a'.repeat(4 * 1024 * 1024) : '{}')
+      bundle[n] = { type: 'asset' }
+    }
+    const fetchMock = vi.fn(async () => okResp())
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), dir, bundle)
+    expect(fetchMock).toHaveBeenCalledTimes(2) // [big1] + [big2, tiny],而非一锅 8MB
+    vi.restoreAllMocks()
+  })
+
+  it('opts.app 随表单上传(monorepo 多应用分桶);413 给出调服务器限制的明话', async () => {
+    const { dir, bundle } = await setupDist({ 'a.js.map': '{}' })
+    const fetchMock = vi.fn(async () => okResp())
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    await run(mooSourcemapUpload({ ...OPTS, app: 'admin', injectDebugIds: false }), dir, bundle)
+    expect(((fetchMock.mock.calls[0][1] as RequestInit).body as FormData).get('app')).toBe('admin')
+    vi.restoreAllMocks()
+
+    const { dir: d2, bundle: b2 } = await setupDist({ 'b.js.map': '{}' })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 413 })))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), d2, b2)
+    expect(warnSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('post_max_size')
+    vi.restoreAllMocks()
+  })
+
+  it('上传成功日志带「约 2 分钟后生效」预期', async () => {
+    const { dir, bundle } = await setupDist({ 'c.js.map': '{}' })
+    vi.stubGlobal('fetch', vi.fn(async () => okResp()))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), dir, bundle)
+    expect(logSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('生效')
+    vi.restoreAllMocks()
+  })
+})

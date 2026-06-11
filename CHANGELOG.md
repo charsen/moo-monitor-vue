@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.9
+
+按同事真实测试环境(monorepo 多应用、大 map、本地打包)推演的三修:
+
+1. **monorepo 多应用互相清集**:admin/website 等多个 Vite 应用共用同一 release/token
+   上传时,构建集替换会把彼此的当前集清掉(两应用恰好挤满「保留两集」名额,第三次
+   交错上传必坏)。插件新增 `app` 选项,云端构建集替换与配额按 (release, app) 分桶;
+   单应用项目不填无感。**monorepo 各应用务必配置不同 app**。需云端配套(migrate)。
+2. **大 map 撞 post_max_size 报误导性 401**:分块只按条数(20 个),大 map 项目单请求
+   可达数十 MB,超过服务器 post_max_size(常见默认 8M)时整个 POST 被 PHP 丢弃,
+   Laravel 连 token 都读不到 → 401。分块加「累计 ≤6MB」约束;413 时给出
+   「调 post_max_size / upload_max_filesize ≥20M」的明话。
+3. **上传后约 2 分钟才生效、无预期提示**:防抖收尾(~95s)+ 队列消费,传完立刻看
+   错误会以为没生效。云端响应带 finalize_eta_seconds,插件成功日志注明
+   「约 2 分钟后生效」。
+
+- 测试 +3(字节分块 / app 表单与 413 明话 / 生效预期日志),114 passed。
+
 ## 0.3.8
 
 **构建集替换** —— 修复同 release 重复构建导致的 sourcemap 无限堆积。

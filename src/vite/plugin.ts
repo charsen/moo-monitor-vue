@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile, unlink, writeFile } from 'node:fs/promises'
+import { readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { Plugin } from 'vite'
 
@@ -22,6 +22,11 @@ export interface SourcemapUploadOptions {
   /** 上传成功后从产物目录删除 .map(不随站点发布、不泄源码),默认 false;生产建议 true */
   deleteAfterUpload?: boolean
   /**
+   * 多应用标识(monorepo 必填):admin/website 等多个 Vite 应用共用同一 release/token 上传时,
+   * 各应用须声明不同 app,否则云端「构建集替换」会把彼此的工件互相清掉。单应用项目可不填。
+   */
+  app?: string
+  /**
    * 给每个 bundle 注入 Debug ID(默认 true):产物与 map 内容级强绑定,云端按 ID 匹配,
    * 不再依赖「release 三处一致」与文件名 —— 传错批次会显式匹配失败而非错位还原。
    * 需 SDK ≥0.3.7(帧上报携带 debug_id)+ 云端配套;关掉则退回 release+文件名匹配。
@@ -33,8 +38,11 @@ export interface SourcemapUploadOptions {
   silent?: boolean
 }
 
-/** 单次请求最多文件数(与云端上限对齐,留余量)。 */
+/** 单次请求最多文件数(与云端上限对齐,留余量;也勿超 PHP max_file_uploads 默认 20)。 */
 const MAX_FILES_PER_REQUEST = 20
+
+/** 单次请求累计字节上限:保守低于服务器 post_max_size 的常见默认(8M)。 */
+const MAX_REQUEST_BYTES = 6 * 1024 * 1024
 
 /** js 内容 sha256 → 确定性 uuid 形态的 debug id(同一构建产物永远同 ID,watch 重跑不漂移)。 */
 function deriveDebugId(jsContent: string): string {
@@ -130,6 +138,33 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       // (否则每次构建全部改名,旧 map 无限堆积、占满 release 配额);同一构建的分块/
       // 断点补传/CI 重跑同内容则相安无事。
       const buildId = createHash('sha256').update([...names].sort().join('\n')).digest('hex').slice(0, 32)
+      // 分块同时受「条数 ≤20」与「累计 ≤6MB」约束:只按条数的话,20 个大 map 一个请求可达
+      // 数十 MB,超过服务器 post_max_size(常见默认 8M)时整个 POST 被 PHP 丢弃 ——
+      // Laravel 连 token 都读不到,报出来的是误导性的 401。
+      const sizes = new Map<string, number>()
+      for (const n of names) {
+        try {
+          sizes.set(n, (await stat(join(dir, n))).size)
+        } catch {
+          sizes.set(n, 0)
+        }
+      }
+      const chunks: string[][] = []
+      {
+        let cur: string[] = []
+        let curBytes = 0
+        for (const n of names) {
+          const sz = sizes.get(n) ?? 0
+          if (cur.length > 0 && (cur.length >= MAX_FILES_PER_REQUEST || curBytes + sz > MAX_REQUEST_BYTES)) {
+            chunks.push(cur)
+            cur = []
+            curBytes = 0
+          }
+          cur.push(n)
+          curBytes += sz
+        }
+        if (cur.length) chunks.push(cur)
+      }
       let uploaded = 0
       let unchanged = 0
       let fileErrors = 0
@@ -146,12 +181,12 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         fail(`${reason}(已传 ${sentFiles}/${names.length} 个文件,release ${opts.release} 处于部分上传状态,重跑构建可补齐)`)
       }
 
-      for (let i = 0; i < names.length; i += MAX_FILES_PER_REQUEST) {
-        const chunk = names.slice(i, i + MAX_FILES_PER_REQUEST)
+      for (const chunk of chunks) {
         const form = new FormData()
         form.append('token', opts.token)
         form.append('release', opts.release)
         form.append('build_id', buildId)
+        if (opts.app) form.append('app', opts.app)
         for (const name of chunk) {
           const buf = await readFile(join(dir, name))
           // 文件名只取 basename:云端用「去 .map 后的产物名」匹配错误栈帧里的文件
@@ -178,6 +213,10 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
           fail('sourcemap 还原为 VIP 功能 —— 请项目拥有者开通会员后再传(本次构建不受影响)。')
           return
         }
+        if (res.status === 413) {
+          abort('上传失败:HTTP 413(请求体超过服务器上传限制)—— 请将服务端 PHP 的 post_max_size / upload_max_filesize 调到 ≥20M')
+          return
+        }
         if (!res.ok) {
           abort(`上传失败:HTTP ${res.status}${errText ? ` — ${errText}` : ''}`)
           return
@@ -191,7 +230,10 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         }
       }
 
-      log(`已上传 ${uploaded} 个 sourcemap(release ${opts.release}${unchanged ? `,${unchanged} 个未变更跳过` : ''})。`)
+      log(
+        `已上传 ${uploaded} 个 sourcemap(release ${opts.release}${unchanged ? `,${unchanged} 个未变更跳过` : ''})。` +
+          (uploaded > 0 ? '云端还原约 2 分钟后生效(防抖收尾 + 队列消费),刚上报的错误稍后刷新即可看到源码位置。' : ''),
+      )
       if (fileErrors > 0 && opts.failOnError) {
         throw new Error(`[moo-sourcemap] ${fileErrors} 个文件被云端拒绝(原因见上方告警)。`)
       }
