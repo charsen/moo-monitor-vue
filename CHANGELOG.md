@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.8
+
+**构建集替换** —— 修复同 release 重复构建导致的 sourcemap 无限堆积。
+
+- 问题:Vite 产物文件名带内容 hash,每次构建全部改名 → 同 release 重复构建时
+  旧工件按 (release, 文件名) 永远匹配不上、也不被跨 release 滚动清理覆盖,
+  实测一个 release 堆了 1872 个文件(39.6MB),逼近 50MB 配额后开始误拒新文件。
+- 修复:插件按「全部 map 文件名排序哈希」生成**确定性 build_id** 随每个分块上传;
+  云端收到带 build_id 的请求先清掉同 release 下不属于本构建的旧工件
+  (含修复上线前的历史遗留行)。同一构建的分块/断点补传/CI 重跑同内容互不影响;
+  curl 不带 build_id 保持旧语义。需云端配套(migrate)。
+
 ## 0.3.7
 
 **Debug ID 全链路(对标 Sentry)+ 文件名唯一回退** —— sourcemap 匹配不再依赖「release 三处一致」。

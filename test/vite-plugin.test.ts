@@ -55,6 +55,7 @@ describe('mooSourcemapUpload', () => {
     expect(url).toBe('https://cloud.test/api/v1/sourcemaps/intake') // 末尾多余斜杠被归一
     expect(init.body.get('token')).toBe('moo_ci')
     expect(init.body.get('release')).toBe('1.2.3')
+    expect(String(init.body.get('build_id'))).toMatch(/^[0-9a-f]{32}$/) // 构建集标识(文件名单哈希)
     const files = init.body.getAll('files[]') as File[]
     expect(files).toHaveLength(1)
     expect(files[0].name).toBe('index-abc.js.map') // 只取 basename(云端按产物名匹配)
@@ -67,6 +68,9 @@ describe('mooSourcemapUpload', () => {
 
     await run(mooSourcemapUpload(OPTS), dir, bundle)
     expect(fetchMock).toHaveBeenCalledTimes(2) // 20 + 3
+    // 同一构建的两个分块 build_id 必须一致(云端按它做构建集替换,不一致会互删)
+    const ids = fetchMock.mock.calls.map((c) => String((c[1] as { body: FormData }).body.get('build_id')))
+    expect(ids[0]).toBe(ids[1])
   })
 
   it('deleteAfterUpload:上传成功后从产物目录删除 .map', async () => {

@@ -125,6 +125,11 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       }
 
       const url = opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/intake'
+      // 构建集标识(确定性):全部 map 文件名排序后哈希 —— Vite 产物名带内容 hash,
+      // 名单即构建内容。云端按它做「构建集替换」:同 release 重复构建时旧工件整组清掉
+      // (否则每次构建全部改名,旧 map 无限堆积、占满 release 配额);同一构建的分块/
+      // 断点补传/CI 重跑同内容则相安无事。
+      const buildId = createHash('sha256').update([...names].sort().join('\n')).digest('hex').slice(0, 32)
       let uploaded = 0
       let unchanged = 0
       let fileErrors = 0
@@ -146,6 +151,7 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         const form = new FormData()
         form.append('token', opts.token)
         form.append('release', opts.release)
+        form.append('build_id', buildId)
         for (const name of chunk) {
           const buf = await readFile(join(dir, name))
           // 文件名只取 basename:云端用「去 .map 后的产物名」匹配错误栈帧里的文件
