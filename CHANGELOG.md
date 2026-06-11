@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.10
+
+**行为轨迹「源码化」**(同事提议):轨迹不再只是 DOM 选择器和 URL,两层增强 ——
+
+1. **点击/输入/按键轨迹带所属 Vue 组件名**:从 DOM 元素经 __vueParentComponent 反查
+   实例链上第一个有名字的组件(编译期注入的字面量,生产压缩保留)——
+   `button.ant-btn "登录" · LoginForm`。非 Vue 区域自动省略,反查失败不影响轨迹本体。
+2. **失败 fetch 轨迹带发起方调用帧**:level=error 的请求采一帧调用位置
+   (best-effort,含 debug_id;成功请求零成本不采)放 crumb.data.frame;
+   云端在还原栈帧的同一遍 sourcemap 解析里顺手还原,时间线显示
+   「↳ 发起于 src/api/login.ts:42」(原压缩帧保留在 data.frame 可追溯)。
+   需云端配套部署(无迁移)。
+
+- 测试 +2(组件名反查 / 失败采帧·成功不采),116 passed。
+
 ## 0.3.9
 
 按同事真实测试环境(monorepo 多应用、大 map、本地打包)推演的三修:

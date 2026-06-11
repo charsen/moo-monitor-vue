@@ -256,3 +256,36 @@ describe('beforeSend(补测试缺口)', () => {
     expect(body.records[0].error.message).toBe('[改写] keep')
   })
 })
+
+describe('轨迹源码化(0.3.10)', () => {
+  it('点击/输入轨迹带所属 Vue 组件名(__vueParentComponent 反查)', () => {
+    const { crumbsNow } = makeClient()
+    document.body.innerHTML = '<div id="form"><button id="login">登录</button></div>'
+    const btn = document.getElementById('login')!
+    // 模拟 Vue 3 挂载:宿主元素带 __vueParentComponent,组件链上有名字
+    ;(document.getElementById('form') as never as Record<string, unknown>).__vueParentComponent = {
+      type: {}, parent: { type: { __name: 'LoginForm' } },
+    }
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    const click = crumbsNow().find((b) => b.category === 'click')
+    expect(click?.message).toBe('button#login "登录" · LoginForm')
+  })
+
+  it('失败 fetch 的轨迹携带发起方调用帧(data.frame);成功请求不采', async () => {
+    const mk = (status: number) =>
+      vi.fn(() => Promise.resolve({ ok: status < 400, status } as Response))
+    vi.stubGlobal('fetch', mk(504))
+    const { crumbsNow } = makeClient({ httpErrors: false })
+    await window.fetch('https://api.test/login')
+
+    const fail = crumbsNow().find((b) => b.category === 'fetch')
+    expect(fail?.data?.frame).toBeTruthy()
+    expect((fail?.data?.frame as { file?: string }).file).toBeTruthy() // best-effort 调用帧
+
+    vi.stubGlobal('fetch', mk(200))
+    const { crumbsNow: ok } = makeClient({ httpErrors: false })
+    await window.fetch('https://api.test/list')
+    expect(ok().find((b) => b.category === 'fetch')?.data).toBeUndefined() // 成功请求零成本
+  })
+})

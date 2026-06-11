@@ -91,3 +91,32 @@ export function describeElement(el: Element | null): string {
   if (!target || !target.tagName) return '(unknown)'
   return (selectorOf(target) + hintOf(target)).slice(0, 120)
 }
+
+type VueInstance = { type?: { name?: string; __name?: string }; parent?: VueInstance | null }
+
+/**
+ * 从 DOM 元素反查所属 Vue 组件名(轨迹「源码化」第一层):Vue 3 在宿主元素上挂
+ * __vueParentComponent,沿实例链向上取第一个有名字的组件 —— 组件名是编译期注入的
+ * 字符串字面量,生产压缩也保留。非 Vue 区域 / 函数式匿名组件返回 undefined。
+ */
+export function vueComponentName(el: Element | null): string | undefined {
+  try {
+    let cur: Element | null = el
+    for (let i = 0; cur && i < 8; i++) {
+      const inst = (cur as Element & { __vueParentComponent?: VueInstance }).__vueParentComponent
+      if (inst) {
+        let c: VueInstance | null | undefined = inst
+        for (let j = 0; c && j < 12; j++) {
+          const n = c.type?.name || c.type?.__name
+          if (n) return String(n).slice(0, 40)
+          c = c.parent
+        }
+        return undefined
+      }
+      cur = cur.parentElement
+    }
+  } catch {
+    /* 反查失败不影响轨迹本体 */
+  }
+  return undefined
+}

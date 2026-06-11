@@ -1,6 +1,9 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
-import { describeElement, isEditable } from './dom'
+import { debugIdForFile } from './debugIds'
+import { describeElement, isEditable, vueComponentName } from './dom'
 import { normalize } from './normalize'
+import { parseStack } from './stacktrace'
+import { scrub } from './scrub'
 import { Queue } from './queue'
 import { isIgnored, shouldSample } from './sampling'
 import { Scope } from './scope'
@@ -191,7 +194,7 @@ export class MooClient {
         const t = e.target as Element | null
         if (!t || !t.tagName) return
         this.lastInputEl = null // 点了别处,下一段输入重新记
-        this.addBreadcrumb({ category: 'click', message: describeElement(t) })
+        this.addBreadcrumb({ category: 'click', message: this.describeWithComponent(t) })
       } catch (err) {
         this.opts.onError?.(err)
       }
@@ -209,14 +212,14 @@ export class MooClient {
         const t = ke.target as Element | null
         if (key === 'Enter' || key === 'Escape') {
           this.lastInputEl = null
-          this.addBreadcrumb({ category: 'key', message: `${key} → ${describeElement(t)}` })
+          this.addBreadcrumb({ category: 'key', message: `${key} → ${this.describeWithComponent(t)}` })
           return
         }
         if (ke.ctrlKey || ke.metaKey || ke.altKey) return // 快捷键不算输入
         if (key.length === 1 && t && t.tagName && isEditable(t)) {
           if (this.lastInputEl === t) return
           this.lastInputEl = t
-          this.addBreadcrumb({ category: 'input', message: `输入 → ${describeElement(t)}` })
+          this.addBreadcrumb({ category: 'input', message: `输入 → ${this.describeWithComponent(t)}` })
         }
       } catch (err) {
         this.opts.onError?.(err)
@@ -308,9 +311,17 @@ export class MooClient {
     window.addEventListener('popstate', this.onPopstate)
   }
 
+  /** 元素描述 + 所属 Vue 组件名(轨迹「源码化」第一层:`button.ant-btn "登录" · LoginForm`)。 */
+  private describeWithComponent(t: Element | null): string {
+    const comp = vueComponentName(t)
+    return describeElement(t) + (comp ? ` · ${comp}` : '')
+  }
+
   /**
    * fetch 轨迹落格:与上一条比对,连续同一请求(同 method+url+status,典型轮询)原地折叠成
    * 「… ×N」并刷新时间;中间插入过其他轨迹(点击/路由等)则正常另起一条,保持时序不乱。
+   * 失败请求(level=error)附带发起方调用帧(data.frame,含 debug_id)——
+   * 云端在还原栈帧的同一遍解析里把它还原成「发起于 src/api/login.ts:42」。
    */
   private fetchCrumb(key: string, level: Breadcrumb['level']): void {
     if (key.length > 280) key = key.slice(0, 280) + '…' // data: 巨串 URL;折叠路径直接改写 message,须在此截
@@ -323,7 +334,28 @@ export class MooClient {
       return
     }
     this.lastFetch = { key, n: 1 }
-    this.addBreadcrumb({ category: 'fetch', level, message: key })
+    const crumb: Breadcrumb = { category: 'fetch', level, message: key }
+    if (level === 'error') {
+      const frame = this.callerFrame()
+      if (frame) crumb.data = { frame }
+    }
+    this.addBreadcrumb(crumb)
+  }
+
+  /**
+   * 失败 fetch 的发起方调用帧(best-effort):此处栈形如
+   * [callerFrame, fetchCrumb, patched-fetch-then, ...业务调用链],跳过 SDK 头部取业务帧。
+   * 打包内联可能让头部帧数变化 → 取不准时退化为栈底帧;仅失败请求才采,成本可忽略。
+   */
+  private callerFrame(): { file?: string; line?: number; column?: number; debug_id?: string } | undefined {
+    try {
+      const frames = parseStack(new Error().stack)
+      const f = frames[3] ?? frames[frames.length - 1]
+      if (!f?.file || f.file === 'native' || f.file === 'eval') return undefined
+      return { file: scrub(f.file), line: f.line, column: f.column, debug_id: debugIdForFile(f.file) }
+    } catch {
+      return undefined
+    }
   }
 
   private installFlushOnHide(): void {
