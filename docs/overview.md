@@ -1,6 +1,6 @@
 # moo-monitor-vue 项目说明(研发立项)
 
-> 版本基线:v0.3.7 · 2026-06 · 仓库:https://gitee.com/charsen/moo-monitor-vue
+> 版本基线:v0.3.12 · 2026-06 · 仓库:https://gitee.com/charsen/moo-monitor-vue
 
 ## 一句话介绍
 
@@ -10,14 +10,14 @@
 
 - **问题**:线上前端报错长期处于黑盒状态 —— 用户说「点了没反应」,研发只能凭猜复现;接入商业方案(Sentry 等)存在数据出境/出企、按量计费、与内部告警体系割裂三个问题。
 - **方案**:自研 SDK + 自有云端闭环。错误数据落在自己的服务器,与内部已有的运行时/慢 SQL 监控、钉钉/企微告警共用一套项目、token、通知管道。
-- **量化特征**:零运行时依赖;浏览器包 gzip 约 10KB;接入成本一行 `app.use(MooMonitor, {...})`;111 个自动化测试,经九轮对抗式代码审查。
+- **量化特征**:零运行时依赖;浏览器包 gzip 约 12KB;接入成本一行 `app.use(MooMonitor, {...})`;119 个自动化测试,经十余轮对抗式代码审查。
 
 ## 总体架构
 
 ```
 宿主 Vue 应用(浏览器)
  ├─ 捕获层:onerror / unhandledrejection / Vue errorHandler / Router / fetch ≥500 / 手动
- ├─ 轨迹层:点击 · 键盘 · 路由 · 请求(环形 30 条,出错时随错误带出)
+ ├─ 轨迹层:点击(带 Vue 组件名)· 键盘 · 路由 · 请求(fetch + XHR/axios;环形 30 条,出错时随错误带出)
  ├─ 归一层:任意抛掷物 → 标准记录(栈解析 / 脱敏 / 稳定指纹)
  ├─ 队列层:同指纹合并计数 → 字节分批 → 截断分级
  └─ 传输层:fetch(常态)/ sendBeacon(页面卸载),429 退避 + 失败回收
@@ -29,7 +29,7 @@ moo-scaffold-cloud(自有云端)
  └─ 消费:错误工作台(链路时间线/趋势/三诊)、钉钉企微邮件告警、「复制给 AI 修复」
 
 构建期(CI 或本地打包)
- └─ Vite 插件:给每个 bundle 注入 Debug ID → 自动上传 .map → 可选清除产物中的 .map
+ └─ Vite 插件:给每个 bundle 注入 Debug ID → 自动上传 .map(构建集替换,多应用分桶)→ 可选清除产物中的 .map
 ```
 
 ## 分模块介绍
@@ -46,14 +46,14 @@ moo-scaffold-cloud(自有云端)
 
 | 模块 | 职责 |
 |---|---|
-| `client.ts` | 总装:生命周期(init/close)、自动捕获安装、行为轨迹手柄、HTTP 错误捕获、会话注入 |
+| `client.ts` | 总装:生命周期(init/close)、自动捕获安装、行为轨迹手柄(fetch + XHR 插桩)、HTTP 错误捕获、会话注入 |
 | `normalize.ts` | 任意抛掷物 → 标准上报记录;栈解析调度;稳定指纹(剥离构建 hash) |
 | `stacktrace.ts` | Chrome/Firefox/Safari/eval/native/无列号 六类栈格式解析 |
 | `queue.ts` | 内存批量队列:同指纹合并、UTF-8 真字节分批(≤56KB)、分级截断、失败回收 |
 | `transport.ts` | 发送通道:fetch / sendBeacon、429 Retry-After 退避、失败分类回调 |
 | `scrub.ts` | 出站脱敏(token=/JWT/Bearer/手机号/身份证) |
 | `breadcrumbs.ts` | 行为轨迹环形队列(30 条,message 钳 300) |
-| `dom.ts` | 操作元素解析:就近交互祖先 + 可读描述,输入控件绝不取值 |
+| `dom.ts` | 操作元素解析:就近交互祖先 + 可读描述 + Vue 业务组件名反查(跳过 UI 库组件),输入控件绝不取值 |
 | `session.ts` | 会话 ID 自动化(sessionStorage,标签页生命周期) |
 | `debugIds.ts` | Debug ID 注册表读取,栈帧携带 ID 上报 |
 | `scope.ts` | 用户/tags/extra 上下文(均有钳制) |
@@ -65,7 +65,7 @@ moo-scaffold-cloud(自有云端)
 
 ### vite 插件(src/vite)
 
-构建结束自动执行:Debug ID 注入(见功能点)→ 收集 `.map` 分批上传 → 可选删除产物中的 `.map` 并清理指向注释。429 自动重试、中途失败给出半传摘要。
+构建结束自动执行:Debug ID 注入(见功能点)→ 收集 `.map` 分批上传(条数 + 字节双重分块,避开服务器上传限制)→ 可选删除产物中的 `.map` 并清理指向注释。429 自动重试、中途失败给出半传摘要、成功日志注明还原生效时间。携带确定性构建集标识与多应用标识(`app`):同版本重复构建自动整组替换旧工件(不堆积),monorepo 多应用互不干扰。
 
 ## 功能点清单
 
@@ -77,17 +77,18 @@ moo-scaffold-cloud(自有云端)
 | 未处理 Promise 拒绝 | `unhandledrejection`,任意抛掷物(字符串/对象/循环引用)安全归一 |
 | Vue 组件错误 | 渲染/生命周期/watcher 错误被 Vue 吞掉、不冒泡到 onerror,单独接管并附**出错组件名** |
 | 路由 chunk 失败 | 发版后旧页面懒加载 404(最常见的"白屏"原因),经 `router.onError` 捕获,且与 Promise 通道防双计 |
-| HTTP 响应错误 | 经包裹的 fetch,状态码 ≥500 自动生成错误(阈值可调/可关);URL 去 query 进指纹,轮询不会刷爆配额 |
+| HTTP 响应错误 | 经包裹的 **fetch 与 XMLHttpRequest(axios)**,状态码 ≥500 自动生成错误(阈值可调/可关);URL 去 query 进指纹,轮询不会刷爆配额 |
 | 资源加载失败 / 手动上报 | img/script/css 404 记为告警级;`captureException/captureMessage` 供业务主动上报 |
 
 ### 2. 操作链路(回答「用户做了什么才报错」)
 
 | 功能点 | 介绍 |
 |---|---|
-| 点击轨迹 | document 级监听,解析到就近交互元素(点中按钮内的图标也归到按钮),产出 `button#checkout "去结算"` 级别的可读描述 |
+| 点击轨迹 | document 级监听,解析到就近交互元素(点中按钮内的图标也归到按钮)并标注**所属 Vue 业务组件**(自动跳过 AInput 等 UI 库组件),产出 `button#checkout "去结算" · LoginForm` 级别的可读描述 |
 | 键盘轨迹 | 只记 Enter/Escape 关键节点与「开始在某输入框打字」事件;**按键值/输入内容/密码一概不采** |
 | 路由轨迹 | SPA 跳转记 `from → to`(history 与 hash 路由均支持) |
-| 请求轨迹 | method/URL/状态码;连续同一请求(轮询)折叠为「×N」,不挤占其他上下文 |
+| 请求轨迹 | fetch 与 XHR(axios)统一覆盖;method/URL/状态码;连续同一请求(轮询)折叠为「×N」;第三方统计域名(GA/百度统计/友盟等)默认过滤不刷屏 |
+| 失败请求溯源 | 失败请求自动携带发起方调用帧,云端经 sourcemap 还原为「发起于 src/api/login.ts:42」(自动避开 request 封装层与依赖库) |
 | 云端时间线 | 配套云端把轨迹渲染成带图标、相对时间(「报错前 3.2s」)、💥 锚点的操作链路 |
 
 ### 3. 上下文与统计
@@ -131,6 +132,7 @@ moo-scaffold-cloud(自有云端)
 | 构建端自动上传 | Vite 插件在构建结束收集 `.map` 上传云端;**生产站点无需部署 .map**(可自动删除并清理指向注释) |
 | Debug ID 注入 | 给每个 bundle 注入内容派生的唯一 ID(对标 Sentry):产物与 map 内容级强绑定,匹配与 release/文件名/部署路径解耦;传错构建批次会显式失败而非错位还原 |
 | 三级匹配链 | Debug ID 直查 → (release, 文件名) 精确 → 文件名项目内唯一回退;老接入与 curl 上传完全兼容 |
+| 构建集管理 | 同版本重复构建自动整组替换旧工件(不堆积、配额不被旧文件占满);保留上一构建集 72h 兜底灰度/回滚窗口;monorepo 多应用按 app 分桶互不干扰 |
 | 云端还原 | 零依赖流式 Source Map 解析(大 map 不爆内存),还原出 `.vue` 源文件(即出错组件)+ 出错行 ±3 行源码,喂给「复制给 AI 修复」 |
 
 ### 8. 工程质量
@@ -138,10 +140,10 @@ moo-scaffold-cloud(自有云端)
 | 功能点 | 介绍 |
 |---|---|
 | 零运行时依赖 | 无任何第三方 npm 依赖进入浏览器;Vue 为可选 peer,核心可用于任意 JS 项目 |
-| 体积 | 浏览器包 gzip ≈ 10KB(Sentry browser SDK 约 25KB+) |
+| 体积 | 浏览器包 gzip ≈ 12KB(Sentry browser SDK 约 25KB+) |
 | 微前端/HMR 友好 | `close()` 完整还原所有补丁与监听器;重复 init 自动收尾,不泄漏不重复上报 |
 | SSR 安全 | 服务端渲染下命令式 API 可用且全部安全 no-op |
-| 质量门禁 | TypeScript strict、ESLint、111 个自动化测试、发布前自动校验;v0.2~v0.3 共经九轮对抗式审查(并发、内存、隐私、协议三方视角) |
+| 质量门禁 | TypeScript strict、ESLint、119 个自动化测试、发布前自动校验;v0.2~v0.3 共经十余轮对抗式审查(并发、内存、隐私、协议多视角) |
 
 ## 边界(刻意不做)
 
