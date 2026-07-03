@@ -46,10 +46,10 @@ npm i git+https://gitee.com/charsen/moo-monitor-vue.git
 # 1) 在 SDK 仓库里打包(会自动 build,产出 .tgz)
 git clone https://gitee.com/charsen/moo-monitor-vue.git
 cd moo-monitor-vue && npm install && npm pack
-# → 生成 moo-monitor-vue-0.3.12.tgz
+# → 生成 moo-monitor-vue-0.3.13.tgz
 
 # 2) 在你的项目里安装这个 tarball
-npm i /绝对路径/moo-monitor-vue/moo-monitor-vue-0.3.12.tgz
+npm i /绝对路径/moo-monitor-vue/moo-monitor-vue-0.3.13.tgz
 ```
 
 装进去的就是 `files` 白名单内容(`dist` + README + LICENSE),和将来发布到 npm 的产物一致。

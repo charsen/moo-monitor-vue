@@ -257,7 +257,7 @@ curl -X POST https://cloud.example.com/api/v1/sourcemaps/intake \
 要点:用插件 + SDK ≥0.3.7 时按 Debug ID 自动匹配(release 仅作展示);老接入按「release + 产物文件 basename」匹配,需**三处一致**;
 云端默认保留最近 15 天 / 5 个 release(单文件 ≤ 20MB、单 release ≤ 50MB);错误先到、map 后上传也行,
 云端会对该 release 重新还原。已传的 map 在 `/app → 设置 → Sourcemap` 查看 / 删除。
-详细排查见 **[docs/sourcemaps.md](docs/sourcemaps.md)**。
+详细排查见 **[docs/sourcemaps.md](docs/sourcemaps.md)**；升级到 0.3.13 的接入步骤与验收清单见 **[docs/upgrade-0.3.13.md](docs/upgrade-0.3.13.md)**。
 
 ## 开发
 
