@@ -1,9 +1,13 @@
 // @vitest-environment node
-import { mkdir, mkdtemp, writeFile, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mooSourcemapUpload } from '../src/vite/plugin'
+import { mooSourcemapUpload, resolveMooRelease } from '../src/vite/plugin'
+
+const execFileAsync = promisify(execFile)
 
 /** 在临时目录铺 .map 文件并构造 writeBundle 的 (output, bundle) 入参。 */
 async function setupDist(files: Record<string, string>) {
@@ -56,6 +60,8 @@ describe('mooSourcemapUpload', () => {
     expect(init.body.get('token')).toBe('moo_ci')
     expect(init.body.get('release')).toBe('1.2.3')
     expect(String(init.body.get('build_id'))).toMatch(/^[0-9a-f]{32}$/) // 构建集标识(文件名单哈希)
+    expect(init.body.get('expected_files')).toBe('1')
+    expect(init.body.get('source_mode')).toBe('context')
     const files = init.body.getAll('files[]') as File[]
     expect(files).toHaveLength(1)
     expect(files[0].name).toBe('index-abc.js.map') // 只取 basename(云端按产物名匹配)
@@ -78,6 +84,75 @@ describe('mooSourcemapUpload', () => {
 
     await run(mooSourcemapUpload({ ...OPTS, deleteAfterUpload: true }), dir, bundle)
     expect(await readdir(dir)).toEqual(['a.js']) // .map 已删,js 保留
+  })
+
+  it('archiveDir:按 release/app 目录归档 sourcemap 和 manifest', async () => {
+    const { dir, bundle } = await setupDist({ 'assets/a.js.map': '{"version":3,"mappings":""}', 'assets/a.js': 'code' })
+    const archive = await mkdtemp(join(tmpdir(), 'moo-sm-archive-'))
+
+    await run(mooSourcemapUpload({ ...OPTS, app: 'admin/web', archiveDir: archive, deleteAfterUpload: true }), dir, bundle)
+
+    const target = join(archive, '1.2.3', 'admin_web')
+    expect((await readdir(target)).sort()).toEqual(['a.js.map', 'manifest.json'])
+    const manifest = JSON.parse(await readFile(join(target, 'manifest.json'), 'utf8')) as { release: string; app: string; files: string[] }
+    expect(manifest.release).toBe('1.2.3')
+    expect(manifest.app).toBe('admin/web')
+    expect(manifest.files).toEqual(['a.js.map'])
+  })
+
+  it('sourceMode=position:上传和归档前剥离 sourcesContent', async () => {
+    const { dir, bundle } = await setupDist({
+      'assets/a.js.map': JSON.stringify({ version: 3, sources: ['src/App.vue'], sourcesContent: ['secret source'], names: [], mappings: '' }),
+      'assets/a.js': 'code',
+    })
+
+    await run(mooSourcemapUpload({ ...OPTS, sourceMode: 'position', injectDebugIds: false }), dir, bundle)
+
+    expect(JSON.parse(await readFile(join(dir, 'assets/a.js.map'), 'utf8')).sourcesContent).toBeUndefined()
+    const form = (fetchMock.mock.calls[0][1] as { body: FormData }).body
+    expect(form.get('source_mode')).toBe('position')
+    const uploaded = form.get('files[]') as File
+    expect(await uploaded.text()).not.toContain('sourcesContent')
+  })
+
+  it('strict:云端健康检查不达标时让构建失败', async () => {
+    fetchMock.mockImplementation(async () =>
+      okResponse({
+        ok: true,
+        saved: 1,
+        skipped: 0,
+        errors: {},
+        health: { current_build_artifacts: 1, missing_files: 1, debug_id_coverage: 0.5, duplicate_debug_ids: 0 },
+      }),
+    )
+    const { dir, bundle } = await setupDist({ 'a.js.map': '{}', 'b.js.map': '{}' })
+
+    await expect(run(mooSourcemapUpload({ ...OPTS, strict: true, injectDebugIds: false }), dir, bundle)).rejects.toThrow('strict check failed')
+  })
+
+  it('strict:云端未返回 health(版本过旧)时同样失败,不静默放行', async () => {
+    fetchMock.mockImplementation(async () => okResponse({ ok: true, saved: 1, skipped: 0, errors: {} }))
+    const { dir, bundle } = await setupDist({ 'a.js.map': '{}' })
+
+    await expect(run(mooSourcemapUpload({ ...OPTS, strict: true, injectDebugIds: false }), dir, bundle)).rejects.toThrow('未返回 health')
+  })
+
+  it('strict:上传中断(HTTP 500)也直接失败,不受 failOnError 默认值影响', async () => {
+    fetchMock.mockImplementation(async () => okResponse({ ok: false }, 500))
+    const { dir, bundle } = await setupDist({ 'a.js.map': '{}' })
+
+    await expect(run(mooSourcemapUpload({ ...OPTS, strict: true, injectDebugIds: false }), dir, bundle)).rejects.toThrow('HTTP 500')
+  })
+
+  it('archiveDir 归档失败:默认只告警不挡构建,上传照常', async () => {
+    const { dir, bundle } = await setupDist({ 'a.js.map': '{}' })
+    const blocker = join(dir, 'archive-blocker')
+    await writeFile(blocker, 'not a dir') // archiveDir 指向一个文件 → mkdir 失败
+
+    await run(mooSourcemapUpload({ ...OPTS, archiveDir: blocker, injectDebugIds: false }), dir, bundle)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes('归档 sourcemap 失败'))).toBe(true)
   })
 
   it('云端逐文件报错时:告警、不删 map;failOnError 才抛', async () => {
@@ -166,5 +241,65 @@ describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () =>
     await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), dir, bundle)
     expect(logSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('生效')
     vi.restoreAllMocks()
+  })
+})
+
+describe('resolveMooRelease', () => {
+  async function git(cwd: string, args: string[]) {
+    const { stdout } = await execFileAsync('git', args, { cwd })
+    return String(stdout).trim()
+  }
+
+  it('按最近 git tag + 8 位 commit hash 生成 release', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-release-'))
+    await git(dir, ['init'])
+    await git(dir, ['config', 'user.email', 'test@example.com'])
+    await git(dir, ['config', 'user.name', 'Test'])
+    await writeFile(join(dir, 'a.txt'), 'a')
+    await git(dir, ['add', 'a.txt'])
+    await git(dir, ['commit', '-m', 'init'])
+    await git(dir, ['tag', 'v1.2.3'])
+    await writeFile(join(dir, 'a.txt'), 'b')
+    await git(dir, ['commit', '-am', 'next'])
+
+    const commit = await git(dir, ['rev-parse', '--short=8', 'HEAD'])
+
+    await expect(resolveMooRelease({ cwd: dir })).resolves.toBe(`v1.2.3-${commit}`)
+  })
+
+  it('找不到 tag 时使用 fallbackTag', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-release-'))
+    await git(dir, ['init'])
+    await git(dir, ['config', 'user.email', 'test@example.com'])
+    await git(dir, ['config', 'user.name', 'Test'])
+    await writeFile(join(dir, 'a.txt'), 'a')
+    await git(dir, ['add', 'a.txt'])
+    await git(dir, ['commit', '-m', 'init'])
+
+    const commit = await git(dir, ['rev-parse', '--short=8', 'HEAD'])
+
+    await expect(resolveMooRelease({ cwd: dir, fallbackTag: 'local' })).resolves.toBe(`local-${commit}`)
+  })
+
+  it('describe 找不到可达 tag 时默认退回最新本地 tag', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-release-'))
+    await git(dir, ['init'])
+    await git(dir, ['config', 'user.email', 'test@example.com'])
+    await git(dir, ['config', 'user.name', 'Test'])
+    await writeFile(join(dir, 'a.txt'), 'a')
+    await git(dir, ['add', 'a.txt'])
+    await git(dir, ['commit', '-m', 'main'])
+    const mainBranch = await git(dir, ['branch', '--show-current'])
+    await git(dir, ['checkout', '--orphan', 'release-line'])
+    await writeFile(join(dir, 'b.txt'), 'b')
+    await git(dir, ['add', 'b.txt'])
+    await git(dir, ['commit', '-m', 'tagged'])
+    await git(dir, ['tag', 'v9.9.9'])
+    await git(dir, ['checkout', mainBranch])
+
+    const commit = await git(dir, ['rev-parse', '--short=8', 'HEAD'])
+
+    await expect(resolveMooRelease({ cwd: dir, tagPrefix: 'v' })).resolves.toBe(`v9.9.9-${commit}`)
+    await expect(resolveMooRelease({ cwd: dir, tagPrefix: 'v', fallbackToLatestTag: false, fallbackTag: 'local' })).resolves.toBe(`local-${commit}`)
   })
 })

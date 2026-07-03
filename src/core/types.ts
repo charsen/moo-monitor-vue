@@ -92,6 +92,11 @@ export interface MooOptions {
   /** 自动生成会话 ID(sessionStorage,标签页生命周期),默认 true;setUser({ sessionId }) 优先。 */
   autoSession?: boolean
   /**
+   * 运行时 release 自检(默认关闭):用 frontend_errors token 只读查询云端该 release 的 sourcemap 健康摘要。
+   * 建议在开发/灰度开启,生产高流量站点可设较低 sampleRate。
+   */
+  releaseCheck?: boolean | { sampleRate?: number; app?: string }
+  /**
    * HTTP 响应错误自动捕获(经包裹的 fetch):默认 true = 状态码 ≥500 生成一条 HttpError;
    * { min: 400 } 可降阈值;false 关闭(仅留 fetch breadcrumb)。
    */
@@ -125,6 +130,7 @@ export interface ResolvedOptions {
   autoCapture: boolean
   autoBreadcrumbs: boolean
   autoSession: boolean
+  releaseCheck: false | { sampleRate: number; app?: string }
   /** HTTP 错误捕获阈值;null = 关闭。 */
   httpErrorsMin: number | null
   ignoreErrors: (string | RegExp)[]
@@ -155,6 +161,11 @@ export function resolveOptions(o: MooOptions): ResolvedOptions {
     autoCapture: o.autoCapture ?? true,
     autoBreadcrumbs: o.autoBreadcrumbs ?? true,
     autoSession: o.autoSession ?? true,
+    releaseCheck: o.releaseCheck === true
+      ? { sampleRate: 1 }
+      : o.releaseCheck
+        ? { sampleRate: Math.min(Math.max(o.releaseCheck.sampleRate ?? 1, 0), 1), app: o.releaseCheck.app }
+        : false,
     // 阈值钳到 ≥400:min:0 之类会把所有 2xx 也捕成 HttpError,免费档配额瞬间被刷光。
     httpErrorsMin: o.httpErrors === false ? null : o.httpErrors === true || o.httpErrors == null ? 500 : Math.max(o.httpErrors.min ?? 500, 400),
     ignoreErrors: o.ignoreErrors ?? [],

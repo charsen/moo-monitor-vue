@@ -31,22 +31,124 @@ CI 构建(vite build, sourcemap: 'hidden')
 
 1. **token**:`/app → 接入 Token → 生成`,只勾 **「Sourcemap 上传」**,存进 CI 的 secret(如 `MOO_SOURCEMAP_TOKEN`)。
    - ⚠️ 不要复用浏览器里的 `frontend_errors` token:那枚是公开的,复用 = 任何人都能灌/覆盖你的 map。
-2. **vite.config.ts**:`build.sourcemap: 'hidden'` + `mooSourcemapUpload({ endpoint, token, release, deleteAfterUpload: true })`。
+2. **release 生成**:推荐按远程 tag + 当前提交生成,格式为 `[tag]-[8位commit]`,例如 `v1.4.0-a1b2c3d4`。
+   - CI 浅克隆时先 `git fetch origin --tags --force`,或用 `resolveMooRelease({ fetchTags: true })`;
+   - `git describe` 找不到可达 tag 时会退回本地最新 tag;如要严格只接受可达 tag,传 `fallbackToLatestTag: false`;
+   - shell/非 Vite 项目可用 `npx moo-monitor-release --fetch-tags --tag-prefix v` 输出同一规则的 release;
+   - 当前提交还没打 tag 时,取最近可达 tag + 当前 commit,能明确表达“基于哪个发布线构建”;
+   - 找不到 tag 时默认 `untagged-[commit]`,可用 `fallbackTag` 改成项目自己的前缀。
+3. **vite.config.ts**:`build.sourcemap: 'hidden'` + `resolveMooRelease()` + `mooSourcemapUpload({ endpoint, token, release, deleteAfterUpload: true })`。
    - ⚠️ `endpoint` 只填基址(如 `https://cloud.example.com/api/v1`),**与 SDK init 的 endpoint 同值原样照抄**,
      不要自己拼 `/sourcemaps/intake`(少 `/api/v1` 或填成业务站域名都会 404);
    - 大型多入口项目 map 很多时,可用 `include` 只传业务入口:`include: /assets\/(index|admin)-.*\.js\.map$/`。
-3. **release 三处一致**(这是最常见的翻车点):
-   - SDK `init({ release })`(运行时,随错误上报);
-   - 插件 `release`(构建时,随 map 上传);
-   - 两者必须来自同一个值(版本号或 commit sha),且与线上实际部署的构建对应。
-4. 发版后到 `/app → 设置 → Sourcemap` 确认工件已出现在对应 release 分组下。
+   - 生产 CI 建议开启 `strict: true`,云端 health 不达标时直接挡构建。
+   - 不希望源码上下文上云时设 `sourceMode: 'position'`,仍可还原文件/行/列,但详情和 AI 修复不会展示源码片段。
+4. **release 两处同源**:
+   - Vite `define: { __MOO_RELEASE__: JSON.stringify(release) }`;
+   - SDK `init({ release: __MOO_RELEASE__ })`;
+   - 插件 `mooSourcemapUpload({ release })`。
+5. 发版后到 `/app → 设置 → Sourcemap` 确认工件已出现在对应 release 分组下。
+
+## 推荐 Vite 配置
+
+```ts
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { mooSourcemapUpload, resolveMooRelease } from 'moo-monitor-vue/vite'
+
+const release = await resolveMooRelease({
+  fetchTags: process.env.CI === 'true',
+  tagPrefix: 'v',
+})
+
+export default defineConfig({
+  build: { sourcemap: 'hidden' },
+  define: {
+    __MOO_RELEASE__: JSON.stringify(release),
+  },
+  plugins: [
+    vue(),
+    mooSourcemapUpload({
+      endpoint: 'https://cloud.example.com/api/v1',
+      token: process.env.MOO_SOURCEMAP_TOKEN!,
+      release,
+      sourceMode: 'context',
+      strict: true,
+      archiveDir: '.moo-sourcemaps',
+      deleteAfterUpload: true,
+      failOnError: true,
+    }),
+  ],
+})
+```
+
+SDK 初始化:
+
+```ts
+app.use(MooMonitor, {
+  endpoint: 'https://cloud.example.com/api/v1',
+  token: import.meta.env.VITE_MOO_TOKEN,
+  release: __MOO_RELEASE__,
+  releaseCheck: import.meta.env.DEV || import.meta.env.MODE === 'staging',
+})
+```
+
+TypeScript 项目可在 `src/env.d.ts` 或任意全局声明文件里补:
+
+```ts
+declare const __MOO_RELEASE__: string
+```
+
+## 可选:本地 build release 脚本
+
+需要在 CI 外统一构建变量时,可维护一个项目内脚本:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+export MOO_RELEASE="$(npx moo-monitor-release --fetch-tags --tag-prefix v)"
+echo "MOO_RELEASE=$MOO_RELEASE"
+
+npm run build
+```
+
+然后在 `vite.config.ts` 里优先使用环境变量:
+
+```ts
+const release = process.env.MOO_RELEASE || await resolveMooRelease({ tagPrefix: 'v' })
+```
+
+`archiveDir` 会把上传用的 `.map` 复制到 `archiveDir/release/app` 并写入 `manifest.json`。
+它只做本地/CI 归档;真正用于云端还原的仍是 `/sourcemaps/intake` 上传结果。
+如果归档目录放在项目内,建议把 `.moo-sourcemaps/` 加入 `.gitignore`,避免源码 map 入库。
+
+## 健康检查与 CI 强约束
+
+上传响应会返回 `health`,包含当前构建文件数、缺失文件数、Debug ID 覆盖率、重复 Debug ID、源码上下文模式、该 release 的可还原率。插件配置 `strict: true` 时会检查:
+
+- 云端当前构建文件数与本次构建产物数一致;
+- Debug ID 覆盖率为 100%;
+- 没有重复 Debug ID;
+- 云端回执数量与本地待上传文件数一致。
+
+SDK 侧可开启 `releaseCheck` 做运行时自检。它用浏览器里的 `frontend_errors` token 调只读接口 `/sourcemaps/check`,只返回聚合摘要,不暴露 map 文件或源码。建议开发/灰度开启,生产高流量站点可用采样:
+
+```ts
+app.use(MooMonitor, {
+  endpoint: 'https://cloud.example.com/api/v1',
+  token: import.meta.env.VITE_MOO_TOKEN,
+  release: __MOO_RELEASE__,
+  releaseCheck: { sampleRate: 0.01 },
+})
+```
 
 ## 配额与限制
 
 | 项 | 限制 |
 | --- | --- |
 | 资格 | 项目拥有者 VIP(非 VIP 上传返回 403 `vip_required`) |
-| 保留 | 每项目滚动保留最近 **20 个 release**(按上传时间,旧的连文件一起清) |
+| 保留 | 云端默认保留最近 **15 天 / 5 个 release**(按 release 版本整组清理,旧的连文件一起清);可在云端配置调整 |
 | 大小 | 单文件 ≤ 20MB,单 release 合计 ≤ 50MB,单请求 ≤ 50 个文件 |
 | 格式 | Source Map v3(Vite/esbuild/webpack 默认产物);不支持 index map(带 `sections`) |
 | 服务器 | 上传走 multipart,需云端 PHP `upload_max_filesize`/`post_max_size` ≥ 20M |
@@ -68,6 +170,6 @@ CI 构建(vite build, sourcemap: 'hidden')
 
 - map 文件含源码,云端存**私有盘**,仅项目成员经面板可见(工件列表只显示元数据,文件本身不提供下载)。
 - 详情里展示的「出错源码」摘自 `sourcesContent`,入库前逐行截断并过密钥脱敏(`token=…`/JWT/Bearer 打码),
-  且仅项目成员可见;若完全不想让源码上云,可在构建时关掉 sourcemap 的源码内嵌(代价:无源码上下文,只剩位置还原)。
+  且仅项目成员可见;若完全不想让源码上云,设 `sourceMode: 'position'`,插件会在上传和归档前剥掉 `sourcesContent`(代价:无源码上下文,只剩位置还原)。
 - 生产站点建议 `sourcemap: 'hidden'` + `deleteAfterUpload: true`:`.map` 不留在服务器、产物里也没有指向注释。
 - 上传 token 与浏览器 token 分离(能力隔离),泄漏面只在 CI。

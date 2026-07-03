@@ -72,4 +72,17 @@ describe('MooClient auto-capture', () => {
 
     expect(beacon).not.toHaveBeenCalled()
   })
+
+  it('releaseCheck reports missing sourcemaps through onError only', async () => {
+    const onError = vi.fn()
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify({ ok: true, vip: true, health: { artifact_count: 0 } }), { status: 200 })),
+    )
+    // @ts-expect-error 测试注入 fetch
+    window.fetch = fetchMock
+
+    new MooClient({ ...OPTS, release: 'v1-aabbccdd', autoBreadcrumbs: false, releaseCheck: true, onError })
+    expect(fetchMock).toHaveBeenCalledWith('https://c.test/api/v1/sourcemaps/check', expect.objectContaining({ method: 'POST' }))
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('has no sourcemap artifacts') })))
+  })
 })

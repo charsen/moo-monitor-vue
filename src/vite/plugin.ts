@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto'
-import { readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { copyFile, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { promisify } from 'node:util'
 import type { Plugin } from 'vite'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * Vite 插件:构建结束后把产物里的 .map 上传到 Moo Scaffold Cloud,
@@ -36,6 +40,65 @@ export interface SourcemapUploadOptions {
   failOnError?: boolean
   /** 静默成功日志(告警仍输出),默认 false */
   silent?: boolean
+  /**
+   * 可选:上传前把 sourcemap 归档到本地目录,路径为 archiveDir/release/app。
+   * 适合 CI 另存构建工件;归档后仍可 deleteAfterUpload 删除 dist 里的 .map。
+   */
+  archiveDir?: string
+  /** 源码安全模式:context=保留 sourcesContent 供云端展示源码上下文;position=剥掉源码,仅还原文件/行/列。默认 context。 */
+  sourceMode?: 'context' | 'position'
+  /**
+   * CI 强约束:上传后检查云端 health。true = 要求文件数齐、Debug ID 覆盖 100%、无重复 ID。
+   * 不受 failOnError 影响:健康不达标、上传中断、配置缺失、云端未返回 health(版本过旧)
+   * 都直接让构建失败 —— strict 的语义是「构建通过 = map 一定可用」,任何静默放行都是假保证。
+   */
+  strict?: boolean | { requireAllFiles?: boolean; requireDebugIds?: boolean; allowDuplicateDebugIds?: boolean }
+}
+
+export interface MooReleaseOptions {
+  /** Git 工作目录,默认 process.cwd()。 */
+  cwd?: string
+  /** 只匹配指定前缀的 tag,例 'v' → v1.2.3。默认不限。 */
+  tagPrefix?: string
+  /** 找不到 tag 时使用的前缀,默认 'untagged'。 */
+  fallbackTag?: string
+  /** describe 找不到可达 tag 时,允许退回到本地最新 tag。浅克隆 CI 推荐开启,默认 true。 */
+  fallbackToLatestTag?: boolean
+  /** 生成前先 git fetch <remote> --tags --force。CI 浅克隆且依赖远程 tags 时开启。 */
+  fetchTags?: boolean
+  /** fetchTags 使用的远程名,默认 'origin'。 */
+  remote?: string
+}
+
+async function git(args: string[], cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, { cwd })
+  return String(stdout).trim()
+}
+
+/**
+ * 从当前 Git 版本生成 sourcemap release,格式为 [tag]-[8位commit hash]。
+ *
+ * 推荐在 vite.config.ts 里先 await 一次,同一个值同时用于:
+ *   1. define 注入给浏览器 SDK init({ release });
+ *   2. mooSourcemapUpload({ release }) 上传 map。
+ */
+export async function resolveMooRelease(options: MooReleaseOptions = {}): Promise<string> {
+  const cwd = options.cwd ?? process.cwd()
+  if (options.fetchTags) {
+    await git(['fetch', options.remote ?? 'origin', '--tags', '--force'], cwd)
+  }
+
+  const pattern = options.tagPrefix ? `${options.tagPrefix}*` : '*'
+  const commit = await git(['rev-parse', '--short=8', 'HEAD'], cwd)
+  let tag = await git(['describe', '--tags', '--abbrev=0', '--match', pattern], cwd).catch(() => '')
+  if (!tag && options.fallbackToLatestTag !== false) {
+    tag = await git(['tag', '--list', pattern, '--sort=-creatordate'], cwd)
+      .then((out) => out.split('\n').find(Boolean) ?? '')
+      .catch(() => '')
+  }
+  if (!tag) tag = options.fallbackTag ?? 'untagged'
+
+  return `${tag}-${commit}`
 }
 
 /** 单次请求最多文件数(与云端上限对齐,留余量;也勿超 PHP max_file_uploads 默认 20)。 */
@@ -48,6 +111,10 @@ const MAX_REQUEST_BYTES = 6 * 1024 * 1024
 function deriveDebugId(jsContent: string): string {
   const h = createHash('sha256').update(jsContent).digest('hex')
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`
+}
+
+function safePathSegment(value: string): string {
+  return value.replace(/[\\/:*?"<>|]+/g, '_')
 }
 
 /**
@@ -80,15 +147,26 @@ async function injectDebugId(dir: string, mapName: string): Promise<boolean> {
   return true
 }
 
+async function stripSourcesContent(dir: string, mapName: string): Promise<boolean> {
+  const mapPath = join(dir, mapName)
+  const raw = await readFile(mapPath, 'utf8')
+  const map = JSON.parse(raw) as { sourcesContent?: unknown }
+  if (!('sourcesContent' in map)) return false
+  delete map.sourcesContent
+  await writeFile(mapPath, JSON.stringify(map))
+  return true
+}
+
 export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
   const include = opts.include ?? /\.js\.map$/
   const log = (m: string) => {
     if (!opts.silent) console.log(`[moo-sourcemap] ${m}`)
   }
   const warn = (m: string) => console.warn(`[moo-sourcemap] ⚠ ${m}`)
-  // 失败策略集中一处:failOnError 时抛错挡构建,否则告警放行。
+  // 失败策略集中一处:failOnError / strict 时抛错挡构建,否则告警放行。
+  // strict 也走硬失败:上传中断、配置缺失若只告警,「CI 保证 map 可用」就是假的。
   const fail = (m: string) => {
-    if (opts.failOnError) throw new Error(`[moo-sourcemap] ${m}`)
+    if (opts.failOnError || opts.strict) throw new Error(`[moo-sourcemap] ${m}`)
     warn(m)
   }
 
@@ -131,6 +209,17 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         }
         if (injected > 0) log(`已为 ${injected} 个 bundle 注入 debug id。`)
       }
+      if (opts.sourceMode === 'position') {
+        let stripped = 0
+        for (const mapName of names) {
+          try {
+            stripped += (await stripSourcesContent(dir, mapName)) ? 1 : 0
+          } catch (e) {
+            warn(`剥离 sourcesContent 失败(${mapName}):${e instanceof Error ? e.message : String(e)}。`)
+          }
+        }
+        if (stripped > 0) log(`已从 ${stripped} 个 sourcemap 剥离 sourcesContent(仅位置还原模式)。`)
+      }
 
       const url = opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/intake'
       // 构建集标识(确定性):全部 map 文件名排序后哈希 —— Vite 产物名带内容 hash,
@@ -138,6 +227,31 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       // (否则每次构建全部改名,旧 map 无限堆积、占满 release 配额);同一构建的分块/
       // 断点补传/CI 重跑同内容则相安无事。
       const buildId = createHash('sha256').update([...names].sort().join('\n')).digest('hex').slice(0, 32)
+      if (opts.archiveDir) {
+        // 归档失败不该无条件炸构建(与上传失败同一策略:默认告警,failOnError/strict 才硬失败)。
+        try {
+          const archivePath = join(opts.archiveDir, safePathSegment(opts.release), safePathSegment(opts.app ?? 'default'))
+          await mkdir(archivePath, { recursive: true })
+          await Promise.all(names.map((name) => copyFile(join(dir, name), join(archivePath, basename(name)))))
+          await writeFile(
+            join(archivePath, 'manifest.json'),
+            JSON.stringify(
+              {
+                release: opts.release,
+                app: opts.app ?? null,
+                build_id: buildId,
+                files: [...names].sort().map((name) => basename(name)),
+                created_at: new Date().toISOString(),
+              },
+              null,
+              2,
+            ),
+          )
+          log(`已归档 ${names.length} 个 sourcemap 到 ${archivePath}。`)
+        } catch (e) {
+          fail(`归档 sourcemap 失败(${opts.archiveDir}):${e instanceof Error ? e.message : String(e)}。`)
+        }
+      }
       // 分块同时受「条数 ≤20」与「累计 ≤6MB」约束:只按条数的话,20 个大 map 一个请求可达
       // 数十 MB,超过服务器 post_max_size(常见默认 8M)时整个 POST 被 PHP 丢弃 ——
       // Laravel 连 token 都读不到,报出来的是误导性的 401。
@@ -169,7 +283,15 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       let unchanged = 0
       let fileErrors = 0
       let sentFiles = 0
-      type IntakeBody = { saved?: number; skipped?: number; errors?: Record<string, string>; error?: string; message?: string } | null
+      type IntakeHealth = {
+        current_build_artifacts?: number
+        missing_files?: number | null
+        debug_id_coverage?: number | null
+        duplicate_debug_ids?: number
+        ok?: boolean
+      }
+      let lastHealth: IntakeHealth | undefined
+      type IntakeBody = { saved?: number; skipped?: number; errors?: Record<string, string>; error?: string; message?: string; health?: IntakeHealth } | null
       const postChunk = async (form: FormData) => {
         const res = await fetch(url, { method: 'POST', body: form })
         const body = (await res.json().catch(() => null)) as IntakeBody
@@ -186,6 +308,8 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         form.append('token', opts.token)
         form.append('release', opts.release)
         form.append('build_id', buildId)
+        form.append('expected_files', String(names.length))
+        form.append('source_mode', opts.sourceMode ?? 'context')
         if (opts.app) form.append('app', opts.app)
         for (const name of chunk) {
           const buf = await readFile(join(dir, name))
@@ -224,9 +348,30 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         sentFiles += chunk.length
         uploaded += body?.saved ?? 0
         unchanged += body?.skipped ?? 0
+        lastHealth = body?.health
         for (const [file, reason] of Object.entries(body?.errors ?? {})) {
           fileErrors++
           warn(`${file}: ${reason}`)
+        }
+      }
+
+      if (opts.strict && !lastHealth) {
+        // 云端版本过旧(响应无 health 字段)时静默放行 = CI 以为有保护、实际没有。
+        throw new Error('[moo-sourcemap] strict 已开启但云端未返回 health(云端版本过旧或响应异常),无法验证上传结果 —— 请升级云端,或暂时关闭 strict。')
+      }
+      if (opts.strict && lastHealth) {
+        const strict = opts.strict === true ? {} : opts.strict
+        const requireAllFiles = strict?.requireAllFiles ?? true
+        const requireDebugIds = strict?.requireDebugIds ?? true
+        const allowDuplicateDebugIds = strict?.allowDuplicateDebugIds ?? false
+        const failures: string[] = []
+        if (requireAllFiles && (lastHealth.missing_files ?? 0) > 0) failures.push(`缺少 ${lastHealth.missing_files} 个文件`)
+        if (requireAllFiles && (lastHealth.current_build_artifacts ?? 0) < names.length) failures.push(`云端当前构建只有 ${lastHealth.current_build_artifacts ?? 0}/${names.length} 个文件`)
+        if (requireDebugIds && lastHealth.debug_id_coverage !== 1) failures.push(`Debug ID 覆盖率 ${Math.round((lastHealth.debug_id_coverage ?? 0) * 100)}%`)
+        if (!allowDuplicateDebugIds && (lastHealth.duplicate_debug_ids ?? 0) > 0) failures.push(`重复 Debug ID ${lastHealth.duplicate_debug_ids} 个`)
+        if (uploaded + unchanged + fileErrors !== names.length) failures.push(`上传回执数量不一致:${uploaded}+${unchanged}+${fileErrors}/${names.length}`)
+        if (failures.length) {
+          throw new Error(`[moo-sourcemap] sourcemap strict check failed:${failures.join('; ')}`)
         }
       }
 

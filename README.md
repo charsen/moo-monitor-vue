@@ -2,7 +2,7 @@
 
 轻量 **Vue 3 前端异常监控 SDK** —— 捕获浏览器 JS 错误并上报到 [Moo Scaffold Cloud](https://gitee.com/charsen/moo-scaffold-cloud) 的前端错误管道,在云端按指纹聚合、三诊(待处理 / 处理中 / 已解决)。
 
-> 对标 Sentry 的浏览器 SDK,但精简自建:只做**异常捕获 + 行为轨迹 + 上下文 + 可靠上报**,零运行时依赖(gzip ≈ 4.3KB)。
+> 对标 Sentry 的浏览器 SDK,但精简自建:只做**异常捕获 + 行为轨迹 + 上下文 + 可靠上报**,零运行时依赖(gzip ≈ 12KB)。
 
 ## 特性
 
@@ -38,6 +38,7 @@ app.use(MooMonitor, {
   token: import.meta.env.VITE_MOO_TOKEN,       // 项目推送 token(需含 frontend_errors 权限)
   env: import.meta.env.MODE,                   // production / staging / ...
   release: __APP_VERSION__,                     // 版本号(建议注入 build 时的版本/commit)
+  // releaseCheck: import.meta.env.DEV || import.meta.env.MODE === 'staging',
   sampleRate: 1,
   ignoreErrors: ['ResizeObserver loop', /^Script error\.?$/],
   router,                                       // 可选:传入 Vue Router → 捕获懒加载 chunk 失败(发版后旧 chunk 404)
@@ -89,6 +90,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `autoCapture` | `true` | 自动捕获全局/Promise/资源错误 |
 | `autoBreadcrumbs` | `true` | 自动记录点击 / 键盘 / 路由 / fetch 轨迹(键盘只记按键与目标,绝不记内容) |
 | `autoSession` | `true` | 自动生成会话 ID(sessionStorage,标签页生命周期);`setUser({ sessionId })` 优先 |
+| `releaseCheck` | `false` | 可选 release 自检。`true` 或 `{ sampleRate, app }` 会用前端错误 token 查询云端 sourcemap 健康摘要,建议开发/灰度开启 |
 | `httpErrors` | `true` | fetch 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭 |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
 | `ignoreFetchUrls` | 内置统计域名 | 请求轨迹忽略名单(GA/GTM/百度统计/友盟/神策等默认忽略,传 `[]` 全保留) |
@@ -177,26 +179,66 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 这枚 token 是 CI 密钥 —— 绝不能复用 SDK init 那枚 `frontend_errors` token(它在浏览器 JS 里人人可见,
 复用等于任何人都能往你的项目灌/覆盖 map)。
 
-**2)Vite 插件**(推荐,vite.config.ts):
+**2)统一生成 release**:推荐用远程 tag + 当前提交生成 `release`,格式为 `[tag]-[8位commit]`,例如
+`v1.4.0-a1b2c3d4`。CI 浅克隆时先拉 tags:
+
+```bash
+git fetch origin --tags --force
+npx moo-monitor-release --fetch-tags --tag-prefix v
+```
+
+**3)Vite 插件**(推荐,vite.config.ts):
 
 ```ts
-import { mooSourcemapUpload } from 'moo-monitor-vue/vite'
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import { mooSourcemapUpload, resolveMooRelease } from 'moo-monitor-vue/vite'
+
+const release = await resolveMooRelease({
+  fetchTags: process.env.CI === 'true', // CI 里按远程 tags 生成 release
+  tagPrefix: 'v',
+})
 
 export default defineConfig({
   build: { sourcemap: 'hidden' }, // 生成 .map 但产物 JS 里不留指向注释
+  define: {
+    __MOO_RELEASE__: JSON.stringify(release), // SDK init 与 sourcemap 上传共用同一个值
+  },
   plugins: [
     vue(),
     mooSourcemapUpload({
       endpoint: 'https://cloud.example.com/api/v1',     // 与 SDK init 相同
       token: process.env.MOO_SOURCEMAP_TOKEN!,          // CI 环境变量注入,勿入仓库
-      release: process.env.APP_VERSION!,                // 必须与 SDK init 的 release 完全一致
+      release,
+      sourceMode: 'context',                         // 'context'=源码上下文;'position'=只还原位置、不存源码
+      strict: true,                                  // CI 强约束:文件齐、Debug ID 100%、无重复 ID
+      archiveDir: '.moo-sourcemaps',                    // 可选:按 release/app 目录归档 map
       deleteAfterUpload: true,                          // 上传后从产物目录删 .map,不随站点发布
     }),
   ],
 })
 ```
 
-插件选项:`include`(默认 `/\.js\.map$/`)、`deleteAfterUpload`(默认 `false`,生产建议 `true`)、
+SDK 初始化里使用同一个构建常量:
+
+```ts
+app.use(MooMonitor, {
+  endpoint: 'https://cloud.example.com/api/v1',
+  token: import.meta.env.VITE_MOO_TOKEN,
+  release: __MOO_RELEASE__,
+  releaseCheck: import.meta.env.DEV || import.meta.env.MODE === 'staging',
+})
+```
+
+TypeScript 项目可在 `src/env.d.ts` 或任意全局声明文件里补:
+
+```ts
+declare const __MOO_RELEASE__: string
+```
+
+插件选项:`include`(默认 `/\.js\.map$/`)、`sourceMode`(`context` 保留源码上下文,`position` 只还原位置)、
+`strict`(CI 强约束:文件齐、Debug ID 覆盖、重复 ID 检查)、`archiveDir`(可选,按 `release/app` 目录归档 map)、
+`deleteAfterUpload`(默认 `false`,生产建议 `true`)、
 `failOnError`(默认 `false`:上传失败只告警不挡构建)、`injectDebugIds`(默认 `true`,见下)、`silent`。
 
 **Debug ID(v0.3.7+,默认开启)**:插件给每个 bundle 注入唯一 ID(写进产物与 map),错误帧
@@ -204,7 +246,7 @@ export default defineConfig({
 解耦;传错构建批次会显式匹配失败而非错位还原。匹配链:`debug_id → (release, 文件名) → 文件名
 项目内唯一回退`。因此 **release 三处一致从「硬约束」降级为「建议」**(老 SDK / curl 上传仍依赖它)。
 
-**3)或裸 API**(非 Vite 项目,CI 里 curl):
+**4)或裸 API**(非 Vite 项目,CI 里 curl):
 
 ```bash
 curl -X POST https://cloud.example.com/api/v1/sourcemaps/intake \
@@ -213,7 +255,7 @@ curl -X POST https://cloud.example.com/api/v1/sourcemaps/intake \
 ```
 
 要点:用插件 + SDK ≥0.3.7 时按 Debug ID 自动匹配(release 仅作展示);老接入按「release + 产物文件 basename」匹配,需**三处一致**;
-每项目滚动保留最近 20 个 release(单文件 ≤ 20MB、单 release ≤ 50MB);错误先到、map 后上传也行,
+云端默认保留最近 15 天 / 5 个 release(单文件 ≤ 20MB、单 release ≤ 50MB);错误先到、map 后上传也行,
 云端会对该 release 重新还原。已传的 map 在 `/app → 设置 → Sourcemap` 查看 / 删除。
 详细排查见 **[docs/sourcemaps.md](docs/sourcemaps.md)**。
 

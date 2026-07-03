@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.13
+
+sourcemap 管线五项闭环 —— 上传即验证、发布可观测(云端配套:intake 响应 health 块 /
+`/sourcemaps/check` / `source_mode` / 可还原率列,migration `2026_07_02_000001`):
+
+1. **CI strict 强约束**:插件新增 `strict: true | { requireAllFiles, requireDebugIds,
+   allowDuplicateDebugIds }` —— 上传后按云端回执 health 校验文件数齐全 / Debug ID
+   100% 覆盖 / 无重复 Debug ID / 回执数量一致,不达标抛错挡构建;上传中断、配置缺失、
+   云端未返回 health(版本过旧)同样硬失败 —— strict 的语义是「构建通过 = map 一定
+   可用」,任何静默放行都是假保证。**需先升级云端再开 strict**。
+2. **SDK 运行时 release 自检**:`releaseCheck: true | { sampleRate, app }` ——
+   初始化后抽样调云端 `/sourcemaps/check`(复用浏览器上报 token,聚合只读),
+   提前发现「代码已发、map 没传/传错」,仅 console.warn 提示不打扰用户。
+3. **源码安全分级**:插件 `sourceMode: 'context' | 'position'` —— position 档上传前
+   本地剥离 sourcesContent(云端存储侧同样兜底剥离),仅还原错误位置、不含源码上下文,
+   适合源码敏感项目;默认 context 不变。
+4. **本地归档**:`archiveDir` —— 上传前把 map 归档到 `archiveDir/release/app/`
+   (含 manifest.json 清单),自留底、不依赖云端保留策略(云端默认 15 天 / 5 个 release)。
+5. **release 解析器**:导出 `resolveMooRelease()`(git describe → 最新 tag → fallback)
+   + `moo-monitor-release` CLI(bin),vite.config 与 CI 两侧共用同一 release 口径。
+
+- 测试 +10(strict 达标/不达标/无 health 不静默放行/上传中断 · releaseCheck 采样与
+  关闭 · sourceMode 剥离 · archiveDir 归档 · release 解析),129 passed。
+
 ## 0.3.12
 
 sourcemap × 行为轨迹 对抗自审 —— 修复 3 个问题:

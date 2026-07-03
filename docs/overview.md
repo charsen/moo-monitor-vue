@@ -10,7 +10,7 @@
 
 - **问题**:线上前端报错长期处于黑盒状态 —— 用户说「点了没反应」,研发只能凭猜复现;接入商业方案(Sentry 等)存在数据出境/出企、按量计费、与内部告警体系割裂三个问题。
 - **方案**:自研 SDK + 自有云端闭环。错误数据落在自己的服务器,与内部已有的运行时/慢 SQL 监控、钉钉/企微告警共用一套项目、token、通知管道。
-- **量化特征**:零运行时依赖;浏览器包 gzip 约 12KB;接入成本一行 `app.use(MooMonitor, {...})`;119 个自动化测试,经十余轮对抗式代码审查。
+- **量化特征**:零运行时依赖;浏览器包 gzip 约 12KB;接入成本一行 `app.use(MooMonitor, {...})`;126 个自动化测试,经十余轮对抗式代码审查。
 
 ## 总体架构
 
@@ -40,7 +40,7 @@ moo-scaffold-cloud(自有云端)
 |---|---|---|
 | `moo-monitor-vue`(core) | 浏览器 | 框架无关的采集/上报内核,可用于任意 JS 项目 |
 | `moo-monitor-vue/vue` | 浏览器 | Vue 3 适配薄层(插件、errorHandler 接管、依赖注入) |
-| `moo-monitor-vue/vite` | Node(构建期) | sourcemap 上传 + Debug ID 注入插件,不进浏览器包 |
+| `moo-monitor-vue/vite` | Node(构建期) | sourcemap 上传 + Debug ID 注入 + CI 健康检查插件,不进浏览器包 |
 
 ### core 内核(src/core,~1300 行)
 
@@ -51,7 +51,7 @@ moo-scaffold-cloud(自有云端)
 | `stacktrace.ts` | Chrome/Firefox/Safari/eval/native/无列号 六类栈格式解析 |
 | `queue.ts` | 内存批量队列:同指纹合并、UTF-8 真字节分批(≤56KB)、分级截断、失败回收 |
 | `transport.ts` | 发送通道:fetch / sendBeacon、429 Retry-After 退避、失败分类回调 |
-| `scrub.ts` | 出站脱敏(token=/JWT/Bearer/手机号/身份证) |
+| `scrub.ts` | 出站脱敏(token=/JWT/Bearer/敏感 key-value) |
 | `breadcrumbs.ts` | 行为轨迹环形队列(30 条,message 钳 300) |
 | `dom.ts` | 操作元素解析:就近交互祖先 + 可读描述 + Vue 业务组件名反查(跳过 UI 库组件),输入控件绝不取值 |
 | `session.ts` | 会话 ID 自动化(sessionStorage,标签页生命周期) |
@@ -65,7 +65,7 @@ moo-scaffold-cloud(自有云端)
 
 ### vite 插件(src/vite)
 
-构建结束自动执行:Debug ID 注入(见功能点)→ 收集 `.map` 分批上传(条数 + 字节双重分块,避开服务器上传限制)→ 可选删除产物中的 `.map` 并清理指向注释。429 自动重试、中途失败给出半传摘要、成功日志注明还原生效时间。携带确定性构建集标识与多应用标识(`app`):同版本重复构建自动整组替换旧工件(不堆积),monorepo 多应用互不干扰。
+构建结束自动执行:Debug ID 注入(见功能点)→ 可选剥离 `sourcesContent` → 收集 `.map` 分批上传(条数 + 字节双重分块,避开服务器上传限制)→ 校验云端 health → 可选删除产物中的 `.map` 并清理指向注释。429 自动重试、中途失败给出半传摘要、成功日志注明还原生效时间。携带确定性构建集标识与多应用标识(`app`):同版本重复构建自动整组替换旧工件(不堆积),monorepo 多应用互不干扰。
 
 ## 功能点清单
 
@@ -121,7 +121,7 @@ moo-scaffold-cloud(自有云端)
 
 | 功能点 | 介绍 |
 |---|---|
-| 出站脱敏 | 消息/堆栈/URL/轨迹中的 `token=`、JWT、`Bearer`、手机号等在**离开浏览器前**打码;云端写入/读取再各兜一层 |
+| 出站脱敏 | 消息/堆栈/URL/轨迹中的 `token=`、JWT、`Bearer`、敏感 key-value 在**离开浏览器前**打码;云端写入/读取再各兜一层 |
 | 输入内容零采集 | 键盘只记事件不记值;输入控件的描述只用 name/placeholder/type |
 | 凭证安全 | 不带 cookie(`credentials: omit`);token 走请求体、无自定义头(免 CORS 预检);浏览器 token 与上传 token 强制隔离 |
 
@@ -131,6 +131,9 @@ moo-scaffold-cloud(自有云端)
 |---|---|
 | 构建端自动上传 | Vite 插件在构建结束收集 `.map` 上传云端;**生产站点无需部署 .map**(可自动删除并清理指向注释) |
 | Debug ID 注入 | 给每个 bundle 注入内容派生的唯一 ID(对标 Sentry):产物与 map 内容级强绑定,匹配与 release/文件名/部署路径解耦;传错构建批次会显式失败而非错位还原 |
+| CI 健康检查 | 上传响应返回 release health;`strict: true` 要求文件齐、Debug ID 覆盖 100%、无重复 ID,不达标直接挡构建 |
+| 源码安全模式 | `sourceMode: 'context'` 展示源码上下文;`position` 在上传/归档前剥离 `sourcesContent`,只还原文件/行/列 |
+| 运行时自检 | SDK 可开启 `releaseCheck`,用浏览器 token 只读检查该 release 是否已有 map、Debug ID 覆盖是否正常 |
 | 三级匹配链 | Debug ID 直查 → (release, 文件名) 精确 → 文件名项目内唯一回退;老接入与 curl 上传完全兼容 |
 | 构建集管理 | 同版本重复构建自动整组替换旧工件(不堆积、配额不被旧文件占满);保留上一构建集 72h 兜底灰度/回滚窗口;monorepo 多应用按 app 分桶互不干扰 |
 | 云端还原 | 零依赖流式 Source Map 解析(大 map 不爆内存),还原出 `.vue` 源文件(即出错组件)+ 出错行 ±3 行源码,喂给「复制给 AI 修复」 |
@@ -143,7 +146,7 @@ moo-scaffold-cloud(自有云端)
 | 体积 | 浏览器包 gzip ≈ 12KB(Sentry browser SDK 约 25KB+) |
 | 微前端/HMR 友好 | `close()` 完整还原所有补丁与监听器;重复 init 自动收尾,不泄漏不重复上报 |
 | SSR 安全 | 服务端渲染下命令式 API 可用且全部安全 no-op |
-| 质量门禁 | TypeScript strict、ESLint、119 个自动化测试、发布前自动校验;v0.2~v0.3 共经十余轮对抗式审查(并发、内存、隐私、协议多视角) |
+| 质量门禁 | TypeScript strict、ESLint、126 个自动化测试、发布前自动校验;v0.2~v0.3 共经十余轮对抗式审查(并发、内存、隐私、协议多视角) |
 
 ## 边界(刻意不做)
 

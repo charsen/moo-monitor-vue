@@ -151,6 +151,7 @@ export class MooClient {
       if (this.opts.autoCapture) this.installGlobalHandlers()
       if (this.opts.autoBreadcrumbs) this.installBreadcrumbs()
       this.installFlushOnHide()
+      this.checkSourcemapRelease()
     } catch (e) {
       this.opts.onError?.(e)
     }
@@ -325,8 +326,13 @@ export class MooClient {
 
     this.origXhrOpen = proto.open
     this.origXhrSend = proto.send
-    const client = this
+    const origXhrOpen = this.origXhrOpen
+    const origXhrSend = this.origXhrSend
     const intake = this.intakeUrl
+    const isIgnoredFetchUrl = (url: string) => this.isIgnoredFetchUrl(url)
+    const httpCrumb = (method: string, url: string, status: number | 'failed', callStack?: string) =>
+      this.httpCrumb(method, url, status, callStack)
+    const onError = (e: unknown) => this.opts.onError?.(e)
     type MooXhr = XMLHttpRequest & { __moo?: { method: string; url: string; stack?: string } }
 
     const open = function (this: MooXhr, ...args: Parameters<XMLHttpRequest['open']>) {
@@ -335,27 +341,27 @@ export class MooClient {
       } catch {
         /* 记录失败不影响请求本体 */
       }
-      return client.origXhrOpen!.apply(this, args)
+      return origXhrOpen.apply(this, args)
     } as typeof proto.open & { __mooPatched?: boolean }
     open.__mooPatched = true
 
     const send = function (this: MooXhr, ...args: Parameters<XMLHttpRequest['send']>) {
       try {
         const meta = this.__moo
-        if (meta && meta.url && meta.url.indexOf(intake) === -1 && !client.isIgnoredFetchUrl(meta.url)) {
+        if (meta && meta.url && meta.url.indexOf(intake) === -1 && !isIgnoredFetchUrl(meta.url)) {
           meta.stack = new Error().stack // 同步留存:loadend 回调里业务调用方已不在栈上
           this.addEventListener('loadend', () => {
             try {
-              client.httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
+              httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
             } catch (e) {
-              client.opts.onError?.(e)
+              onError(e)
             }
           })
         }
       } catch (e) {
-        client.opts.onError?.(e)
+        onError(e)
       }
-      return client.origXhrSend!.apply(this, args)
+      return origXhrSend.apply(this, args)
     } as typeof proto.send & { __mooPatched?: boolean }
     send.__mooPatched = true
 
@@ -457,6 +463,40 @@ export class MooClient {
     this.onPagehide = flush
     window.addEventListener('visibilitychange', this.onVisibility)
     window.addEventListener('pagehide', this.onPagehide)
+  }
+
+  private checkSourcemapRelease(): void {
+    const check = this.opts.releaseCheck
+    if (!check || !this.opts.release || typeof window === 'undefined' || typeof window.fetch !== 'function') return
+    if (check.sampleRate <= 0 || Math.random() > check.sampleRate) return
+
+    const url = this.opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/check'
+    const body = JSON.stringify({ token: this.opts.token, release: this.opts.release, app: check.app })
+    const fetcher = (this.origFetch ?? window.fetch).bind(window)
+    void fetcher(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      credentials: 'omit',
+      mode: 'cors',
+    })
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as
+          | { vip?: boolean; health?: { artifact_count?: number; debug_id_coverage?: number | null; duplicate_debug_ids?: number; restorable_rate?: number | null } }
+          | null
+        if (!res.ok || !data?.health) {
+          throw new Error(`release check failed: HTTP ${res.status}`)
+        }
+        const h = data.health
+        if (data.vip && (h.artifact_count ?? 0) === 0) {
+          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} has no sourcemap artifacts`))
+        } else if ((h.duplicate_debug_ids ?? 0) > 0) {
+          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} has duplicate sourcemap debug ids`))
+        } else if (h.debug_id_coverage != null && h.debug_id_coverage < 1) {
+          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} sourcemap debug id coverage is ${Math.round(h.debug_id_coverage * 100)}%`))
+        }
+      })
+      .catch((e) => this.opts.onError?.(e))
   }
 }
 
