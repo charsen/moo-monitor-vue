@@ -126,15 +126,24 @@ describe('⑤ 重试标记随合并延续 + close() 释放 DOM 引用', () => {
     expect(q.size()).toBe(0)      // 标记延续 → 二次失败丢弃,而非再次回收
   })
 
-  it('close() 清空 lastInputEl / lastFetch(不滞留已脱离的 DOM 节点)', () => {
-    const { client } = makeClient()
+  // 拆分后 lastInputEl / lastFetch 是插桩模块的闭包私有态(不再是 client 字段),按方案 2.4 第 6 条
+  // 改为可观测行为断言:聚合命中 + close 后不再记轨迹 / 不再捕获(监听解绑 + 闭包持有的节点随之释放)。
+  it('输入聚合命中;close() 后解绑监听、不再记录/捕获(不滞留已脱离的 DOM 节点)', () => {
+    const { client, records } = makeClient()
     document.body.innerHTML = '<input name="q">'
-    document.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }))
-    expect((client as unknown as { lastInputEl: unknown }).lastInputEl).toBeTruthy()
+    const input = document.querySelector('input')!
+    // 同一元素连续两次 keydown 聚合成一条(lastInputEl 命中)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }))
+    client.captureException(new Error('probe'))
+    const inputs = (records[records.length - 1].breadcrumbs ?? []).filter((b) => b.category === 'input')
+    expect(inputs).toHaveLength(1) // 两次打字只一条(聚合态生效)
 
-    client.close()
-    expect((client as unknown as { lastInputEl: unknown }).lastInputEl).toBeNull()
-    expect((client as unknown as { lastFetch: unknown }).lastFetch).toBeNull()
+    client.close() // 解绑 click/keydown 监听 + 释放闭包持有的 lastInputEl
+    const n = records.length
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', bubbles: true })) // 监听已解绑,无副作用
+    client.captureException(new Error('after')) // enabled=false → 不入队
+    expect(records.length).toBe(n) // 关闭后不再捕获、无残留监听触发
   })
 })
 

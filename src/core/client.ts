@@ -1,6 +1,6 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
 import { debugIdForFile } from './debugIds'
-import { describeElement, isEditable, vueComponentName } from './dom'
+import { installDomCrumbs } from './instrument/domCrumbs'
 import { installGlobalErrors } from './instrument/globalErrors'
 import type { InstrumentCtx, Uninstall } from './instrument/types'
 import { normalize } from './normalize'
@@ -24,8 +24,6 @@ export class MooClient {
   // 各插桩模块的卸载函数 —— close() 逐个调用还原(补丁按引用条件还原、哨兵检查等语义内聚在各模块闭包里)。
   private uninstallers: Uninstall[] = []
   // 监听器 / 补丁引用 —— 供 close() 解绑还原(否则重复 init / 微前端会泄漏监听器 + 重复上报)。
-  private onClick?: EventListener
-  private onKeydown?: EventListener
   private onPopstate?: EventListener
   private onVisibility?: () => void
   private onPagehide?: () => void
@@ -39,8 +37,6 @@ export class MooClient {
   private origReplaceState?: History['replaceState']
   private patchedPushState?: History['pushState']
   private patchedReplaceState?: History['replaceState']
-  /** 打字聚合:同一元素的连续输入只记一条「输入 →」crumb(换元素 / 按 Enter/Escape 后重新计)。 */
-  private lastInputEl: Element | null = null
   /** fetch 轨迹折叠:连续同一请求(轮询)合成一条 ×N,不让 30 格轨迹被 fetch 刷满、挤掉交互上下文。 */
   private lastFetch: { key: string; n: number } | null = null
   /** popstate(后退/前进)的 from 路径。 */
@@ -129,8 +125,6 @@ export class MooClient {
       }
     }
     if (typeof window !== 'undefined') {
-      if (this.onClick) window.removeEventListener('click', this.onClick, true)
-      if (this.onKeydown) window.removeEventListener('keydown', this.onKeydown, true)
       if (this.onPopstate) window.removeEventListener('popstate', this.onPopstate)
       if (this.onVisibility) window.removeEventListener('visibilitychange', this.onVisibility)
       if (this.onPagehide) window.removeEventListener('pagehide', this.onPagehide)
@@ -145,7 +139,6 @@ export class MooClient {
     }
     this.installed = false
     this.opts.enabled = false // 关闭后不再捕获
-    this.lastInputEl = null // 释放 DOM 引用(微前端卸载后不滞留已脱离的节点)
     this.lastFetch = null
     return ok
   }
@@ -180,8 +173,9 @@ export class MooClient {
     this.installed = true
     const ctx = this.makeCtx()
     if (this.opts.autoCapture) this.tryInstall(() => installGlobalErrors(ctx))
+    if (this.opts.autoBreadcrumbs) this.tryInstall(() => installDomCrumbs(ctx))
     try {
-      if (this.opts.autoBreadcrumbs) this.installBreadcrumbs()
+      if (this.opts.autoBreadcrumbs) this.installNavigationBreadcrumbs()
       // fetch/XHR 补丁独立于 autoBreadcrumbs 门:HttpError 自动捕获只能靠这两个补丁触发,
       // 不能被「关轨迹」连带静默关掉(P0.1)。补丁内部记轨迹与捕获 HttpError 两个动作各自判断。
       if (this.opts.autoBreadcrumbs || this.opts.httpErrorsMin !== null) this.installHttpInstrumentation()
@@ -190,51 +184,6 @@ export class MooClient {
     } catch (e) {
       this.opts.onError?.(e)
     }
-  }
-
-  private installBreadcrumbs(): void {
-    // 点击:document 级捕获,解析「用户操作的元素」—— 就近交互祖先(点中 button 里的 span 也归到 button)
-    // + 可读选择器 + aria/文本提示(见 dom.ts;输入控件绝不取值)。不存 DOM 引用。
-    // 整体 try/catch:轨迹手柄抛错会冒到 window.onerror 被 SDK 自己捕获成「宿主错误」(自噪音)。
-    this.onClick = (e: Event) => {
-      try {
-        const t = e.target as Element | null
-        if (!t || !t.tagName) return
-        this.lastInputEl = null // 点了别处,下一段输入重新记
-        this.addBreadcrumb({ category: 'click', message: this.describeWithComponent(t) })
-      } catch (err) {
-        this.opts.onError?.(err)
-      }
-    }
-    window.addEventListener('click', this.onClick, true)
-
-    // 键盘:只记两类、绝不记输入内容 ——
-    //   ① Enter / Escape(提交、取消的关键节点);
-    //   ② 可编辑元素上的「开始输入」(同一元素的连续打字聚合成一条,只记目标不记值)。
-    this.onKeydown = (e: Event) => {
-      try {
-        const ke = e as KeyboardEvent
-        // 扩展/测试工具会用普通 Event 派发 keydown(无 .key)→ 兜成空串,绝不抛。
-        const key = typeof ke.key === 'string' ? ke.key : ''
-        const t = ke.target as Element | null
-        if (key === 'Enter' || key === 'Escape') {
-          this.lastInputEl = null
-          this.addBreadcrumb({ category: 'key', message: `${key} → ${this.describeWithComponent(t)}` })
-          return
-        }
-        if (ke.ctrlKey || ke.metaKey || ke.altKey) return // 快捷键不算输入
-        if (key.length === 1 && t && t.tagName && isEditable(t)) {
-          if (this.lastInputEl === t) return
-          this.lastInputEl = t
-          this.addBreadcrumb({ category: 'input', message: `输入 → ${this.describeWithComponent(t)}` })
-        }
-      } catch (err) {
-        this.opts.onError?.(err)
-      }
-    }
-    window.addEventListener('keydown', this.onKeydown, true)
-
-    this.installNavigationBreadcrumbs()
   }
 
   /**
@@ -412,12 +361,6 @@ export class MooClient {
         { handled: false, severity: 'error', extra: { status, method } },
       )
     }
-  }
-
-  /** 元素描述 + 所属 Vue 组件名(轨迹「源码化」第一层:`button.ant-btn "登录" · LoginForm`)。 */
-  private describeWithComponent(t: Element | null): string {
-    const comp = vueComponentName(t)
-    return describeElement(t) + (comp ? ` · ${comp}` : '')
   }
 
   /**
