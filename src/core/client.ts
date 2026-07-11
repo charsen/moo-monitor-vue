@@ -7,6 +7,7 @@ import { installHttpCrumbs } from './instrument/httpCrumbs'
 import type { InstrumentCtx, Uninstall } from './instrument/types'
 import { normalize } from './normalize'
 import { Queue } from './queue'
+import { checkSourcemapRelease } from './releaseCheck'
 import { isIgnored, shouldSample } from './sampling'
 import { Scope } from './scope'
 import { autoSessionId } from './session'
@@ -138,10 +139,11 @@ export class MooClient {
     if (this.installed) return
     this.installed = true
     const ctx = this.makeCtx()
-    // releaseCheck 先跑(见 releaseCheck 顺序调整):此刻本实例必未打 fetch 补丁,同步取 window.fetch
-    // 并 bind(window) 发出自检请求 —— 不再需要跨模块拿 origFetch(与旧 `origFetch ?? window.fetch` 分支等价)。
+    // releaseCheck 先跑(见 releaseCheck.ts):此刻本实例必未打 fetch 补丁,同步取 window.fetch
+    // 并 bind(window) 发出自检请求 —— 不再需要跨模块拿 origFetch。各模块 install 各自 try/catch,
+    // releaseCheck 同步抛错也不连坐其余插桩。
     this.tryInstall(() => {
-      this.checkSourcemapRelease()
+      checkSourcemapRelease(this.opts, this.opts.onError)
       return undefined
     })
     if (this.opts.autoCapture) this.tryInstall(() => installGlobalErrors(ctx))
@@ -155,41 +157,6 @@ export class MooClient {
     this.tryInstall(() => installFlushOnHide(ctx))
   }
 
-  private checkSourcemapRelease(): void {
-    const check = this.opts.releaseCheck
-    if (!check || !this.opts.release || typeof window === 'undefined' || typeof window.fetch !== 'function') return
-    if (check.sampleRate <= 0 || Math.random() > check.sampleRate) return
-
-    const url = this.opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/check'
-    const body = JSON.stringify({ token: this.opts.token, release: this.opts.release, app: check.app })
-    // install() 里本函数【先于】httpCrumbs 调用:此刻本实例必未打补丁,直接取 window.fetch 即可
-    // (与旧 `origFetch ?? window.fetch` 分支取到同一引用,零行为变化)。
-    const fetcher = window.fetch.bind(window)
-    void fetcher(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      credentials: 'omit',
-      mode: 'cors',
-    })
-      .then(async (res) => {
-        const data = (await res.json().catch(() => null)) as
-          | { vip?: boolean; health?: { artifact_count?: number; debug_id_coverage?: number | null; duplicate_debug_ids?: number; restorable_rate?: number | null } }
-          | null
-        if (!res.ok || !data?.health) {
-          throw new Error(`release check failed: HTTP ${res.status}`)
-        }
-        const h = data.health
-        if (data.vip && (h.artifact_count ?? 0) === 0) {
-          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} has no sourcemap artifacts`))
-        } else if ((h.duplicate_debug_ids ?? 0) > 0) {
-          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} has duplicate sourcemap debug ids`))
-        } else if (h.debug_id_coverage != null && h.debug_id_coverage < 1) {
-          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} sourcemap debug id coverage is ${Math.round(h.debug_id_coverage * 100)}%`))
-        }
-      })
-      .catch((e) => this.opts.onError?.(e))
-  }
 }
 
 // ---- 模块级单例:供非组件代码直接调用 ----
