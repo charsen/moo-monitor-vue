@@ -31,4 +31,17 @@ describe('parseUA', () => {
     )
     expect(r.browser).toBe('Edge')
   })
+
+  // 源自第七轮审查回归。
+  it('iOS 上的 Chrome / Firefox 不再误判成 Safari(CriOS → Chrome;FxiOS → Firefox;真 Safari 不受影响)', () => {
+    const crios = parseUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0.0.0 Mobile/15E148 Safari/604.1')
+    expect(crios.browser).toBe('Chrome')
+    expect(crios.os).toBe('iOS')
+
+    const fxios = parseUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/127.0 Mobile/15E148 Safari/605.1.15')
+    expect(fxios.browser).toBe('Firefox')
+
+    const safari = parseUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
+    expect(safari.browser).toBe('Safari')
+  })
 })

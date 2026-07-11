@@ -1,5 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { send, inBackoff } from '../src/core/transport'
+import { Queue } from '../src/core/queue'
+import type { FrontendErrorRecord } from '../src/core/types'
 
 const URL_ = 'https://cloud.test/api/v1/frontend-errors/intake'
 
@@ -35,6 +37,34 @@ describe('transport.send', () => {
 
     vi.unstubAllGlobals()
   })
+})
+
+// 真实 transport × Queue 的投递硬化回归 —— queue.test.ts 的 Queue 用例走 vi.mock 的假 transport(测队列逻辑),
+// 这里走真 transport(stub fetch,测投递集成)。设退避(429)的用例集中在文件最后的「退避语义」describe。
+describe('投递硬化:重试标记随合并延续(源自第7轮)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('回收中的记录与新发生合并后,二次失败即丢弃(不无限重试)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('offline'))))
+    const drops: number[] = []
+    const q = new Queue('https://c.test/api/v1/x', 'tok', 50, 20, (n) => drops.push(n))
+    const rec = { hash: 'h1', error: { name: 'E', message: 'm', handled: false, severity: 'error' }, page: {}, client: {}, context: {} } as FrontendErrorRecord
+
+    q.add({ ...rec })
+    q.flush()
+    await Promise.resolve(); await Promise.resolve()
+    expect(q.size()).toBe(1)      // 失败回收(第一次重试机会)
+
+    q.add({ ...rec, count: 1 })   // 错误仍在发生:与回收中的记录合并(新对象)
+    q.flush()
+    await Promise.resolve(); await Promise.resolve()
+    expect(q.size()).toBe(0)      // 标记延续 → 二次失败丢弃,而非再次回收
+  })
+})
+
+// 退避是 transport 模块级状态:设退避(429)的用例必须排在文件最后,否则串染其余用例。
+describe('退避语义(设退避,须在文件最后)', () => {
+  afterEach(() => vi.unstubAllGlobals())
 
   it('enters backoff on 429 (Retry-After) and drops subsequent sends until it elapses', async () => {
     const fetchMock = vi.fn(() =>
@@ -53,7 +83,5 @@ describe('transport.send', () => {
     const ok = send(URL_, 'tok', [{ hash: 'dddddddddddd' }])
     expect(ok).toBe(false)
     expect(fetchMock).not.toHaveBeenCalled()
-
-    vi.unstubAllGlobals()
   })
 })

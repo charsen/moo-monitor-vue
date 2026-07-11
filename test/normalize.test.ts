@@ -100,3 +100,23 @@ describe('normalize', () => {
     expect(json).not.toContain('leaked999')
   })
 })
+
+// 源自第七/第九轮审查回归(指纹稳定 / stableFile,归入 normalize 模块)。
+describe('② 指纹跨发版稳定(剥离产物内容 hash)', () => {
+  const withStack = (file: string) => {
+    const e = new Error('boom')
+    e.stack = `Error: boom\n    at render (https://x.test/assets/${file}:1:100)`
+    return e
+  }
+
+  it('同一错误在两次发版(产物名 hash 轮换)间指纹一致', () => {
+    const a = normalize(withStack('index-DfA3k2Lz.js'), {})
+    const b = normalize(withStack('index-Xy9Qw8Mn.js'), {})
+    expect(a.hash).toBe(b.hash)
+
+    // 语义后缀(-legacy / .min,< 8 位)不受影响,仍参与区分
+    const legacy = normalize(withStack('main-legacy.js'), {})
+    const modern = normalize(withStack('main.js'), {})
+    expect(legacy.hash).not.toBe(modern.hash)
+  })
+})
