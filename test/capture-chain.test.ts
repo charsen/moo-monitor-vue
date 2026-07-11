@@ -254,6 +254,12 @@ describe('选项钳制(footgun 防护)', () => {
     expect(resolveOptions({ ...base, maxBatch: 999 }).maxBatch).toBe(200)
     expect(resolveOptions({ ...base, maxBatch: 0 }).maxBatch).toBe(1)
   })
+
+  it('httpErrors: {} → 500(空对象先取默认再钳,不是 400)(P3.3)', async () => {
+    const { resolveOptions } = await import('../src/core/types')
+    const base = { endpoint: 'x', token: 't' }
+    expect(resolveOptions({ ...base, httpErrors: {} }).httpErrorsMin).toBe(500)
+  })
 })
 
 describe('beforeSend(补测试缺口)', () => {
