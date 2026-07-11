@@ -31,3 +31,13 @@ describe('parseStack', () => {
     expect(parseStack('')).toEqual([])
   })
 })
+
+// 源自第八轮审查回归(无列号帧解析)。
+describe('⑥ 无列号帧解析', () => {
+  it('"at file:line" 解析成 file+line 帧,不再把 URL 当函数名', () => {
+    const frames = parseStack('Error: x\n    at https://x.test/app.js:10\n    at run (https://x.test/app.js:22)\n    at fn (native)')
+    expect(frames[0]).toEqual({ function: '?', file: 'https://x.test/app.js', line: 10 })
+    expect(frames[1]).toEqual({ function: 'run', file: 'https://x.test/app.js', line: 22 })
+    expect(frames[2]).toEqual({ function: 'fn', file: 'native' }) // native 兜底不受影响
+  })
+})

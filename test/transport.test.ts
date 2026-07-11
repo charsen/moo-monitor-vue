@@ -62,6 +62,54 @@ describe('投递硬化:重试标记随合并延续(源自第7轮)', () => {
   })
 })
 
+// 源自第8轮审查回归(缓冲上限 / 超大记录裁剪,真 transport)。
+describe('投递硬化:缓冲上限与超大记录(源自第8轮)', () => {
+  const rec = (hash: string, extra: Partial<FrontendErrorRecord> = {}): FrontendErrorRecord =>
+    ({ hash, error: { name: 'E', message: 'm', handled: false, severity: 'error' }, page: {}, client: {}, context: {}, ...extra }) as FrontendErrorRecord
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('缓冲满:溢出后缓冲里是最新的 200 条(此前留最旧丢最新)', () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: { get: () => null } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const q = new Queue('https://c.test/x', 'tok', 999999, 999999) // 不自动 flush
+    for (let i = 0; i < 205; i++) q.add(rec(`h${String(i).padStart(10, '0')}`))
+
+    expect(q.size()).toBe(200)
+    q.flush()
+    const sent: FrontendErrorRecord[] = []
+    for (const call of fetchMock.mock.calls) {
+      sent.push(...JSON.parse((call[1] as RequestInit).body as string).records)
+    }
+    const hashes = sent.map((r) => r.hash)
+    expect(hashes).toContain('h0000000204') // 最新的还在
+    expect(hashes).not.toContain('h0000000000') // 最旧的被挤掉
+  })
+
+  it('超大记录:url 纳入裁剪;仍超限则丢弃不再发', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: { get: () => null } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const drops: number[] = []
+    const q = new Queue('https://c.test/x', 'tok', 999999, 999999, (n) => drops.push(n))
+
+    q.add(rec('aaaaaaaaaaaa', { page: { url: 'https://x/?q=' + 'a'.repeat(60000) } }))
+    // beforeSend 注入巨型不可裁剪字段(顶层自定义键,truncateRecord 两轮都不会动它)
+    q.add(rec('bbbbbbbbbbbb', { user: { name: 'x'.repeat(60000) } } as never))
+    q.flush()
+
+    const sent: FrontendErrorRecord[] = []
+    for (const call of fetchMock.mock.calls) {
+      sent.push(...JSON.parse((call[1] as RequestInit).body as string).records)
+    }
+    const a = sent.find((r) => r.hash === 'aaaaaaaaaaaa')
+    expect(a?.page.url?.length).toBeLessThanOrEqual(2048) // url 截断后照发
+    expect(sent.find((r) => r.hash === 'bbbbbbbbbbbb')).toBeUndefined() // 不可救的丢弃
+
+    q.add(rec('cccccccccccc'))
+    q.flush() // 下一轮上报 dropped
+    expect(drops).toEqual([1])
+  })
+})
+
 // 退避是 transport 模块级状态:设退避(429)的用例必须排在文件最后,否则串染其余用例。
 describe('退避语义(设退避,须在文件最后)', () => {
   afterEach(() => vi.unstubAllGlobals())

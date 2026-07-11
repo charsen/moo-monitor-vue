@@ -269,6 +269,57 @@ describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () =>
   })
 })
 
+// 源自第八轮审查回归(Vite 插件失败处理)。
+describe('⑤ Vite 插件失败处理', () => {
+  async function setup(maps: Record<string, string>) {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-r8-'))
+    const bundle: Record<string, unknown> = {}
+    for (const [n, c] of Object.entries(maps)) {
+      await writeFile(join(dir, n), c)
+      bundle[n] = { type: 'asset' }
+    }
+    return { dir, bundle }
+  }
+  const OPTS = { endpoint: 'https://cloud.test/api/v1', token: 'ci', release: '1.0.0' }
+  const resp = (status: number, body: unknown) => new Response(JSON.stringify(body), { status })
+
+  it('429 等待后重试一次成功;错误信息兼容 Laravel 的 message 字段', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(429, { message: 'Too Many Attempts.' }))
+      .mockResolvedValueOnce(resp(200, { ok: true, saved: 1, skipped: 0, errors: {} }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const { dir, bundle } = await setup({ 'a.js.map': '{}' })
+    await (mooSourcemapUpload(OPTS).writeBundle as (o: unknown, b: unknown) => Promise<void>)({ dir }, bundle)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2) // 429 → 等 2s 重试一次 → 成功
+    vi.restoreAllMocks()
+  }, 8000)
+
+  it('中途失败给出半传摘要(已传 N/共 M)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { ok: true, saved: 20, skipped: 0, errors: {} }))
+      .mockResolvedValueOnce(resp(500, { message: 'Server Error' }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const maps: Record<string, string> = {}
+    for (let i = 0; i < 25; i++) maps[`c${i}.js.map`] = '{}' // 2 个 chunk(20+5)
+    const { dir, bundle } = await setup(maps)
+    await (mooSourcemapUpload(OPTS).writeBundle as (o: unknown, b: unknown) => Promise<void>)({ dir }, bundle)
+
+    const all = warnSpy.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(all).toContain('已传 20/25')
+    expect(all).toContain('Server Error') // message 字段被读出
+    vi.restoreAllMocks()
+  })
+})
+
 describe('resolveMooRelease', () => {
   async function git(cwd: string, args: string[]) {
     const { stdout } = await execFileAsync('git', args, { cwd })

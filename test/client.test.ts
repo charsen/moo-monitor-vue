@@ -18,6 +18,7 @@ describe('MooClient auto-capture', () => {
     client.flush(true) // 用 beacon 路径(jsdom 无 fetch)
 
     expect(beacon).toHaveBeenCalled()
+    client.close() // 合并进 client.test 后须 close,否则历史/补丁的 __mooPatched 哨兵残留污染后续用例
   })
 
   it('does not double-wrap window.fetch on repeated init', () => {
@@ -25,12 +26,14 @@ describe('MooClient auto-capture', () => {
     // @ts-expect-error 测试注入 fetch
     window.fetch = base
 
-    new MooClient(OPTS)
+    const c1 = new MooClient(OPTS)
     const after1 = window.fetch
     expect((after1 as unknown as { __mooPatched?: boolean }).__mooPatched).toBe(true)
 
-    new MooClient(OPTS)
+    const c2 = new MooClient(OPTS)
     expect(window.fetch).toBe(after1) // 第二次 init 命中哨兵,不再叠加包裹
+    c1.close()
+    c2.close()
   })
 
   it('close() restores window.fetch and stops capturing (microfrontend / repeated init)', () => {
@@ -61,6 +64,7 @@ describe('MooClient auto-capture', () => {
     window.dispatchEvent(new Event('pagehide'))
 
     expect(beacon).toHaveBeenCalled()
+    client.close() // 同上:释放监听 + 还原补丁,避免污染后续用例
   })
 
   it('respects enabled=false (no capture)', () => {
@@ -164,5 +168,25 @@ describe('第七轮审查回归(MooClient)', () => {
       const tags = records[0].payload?.tags as Record<string, string>
       expect(tags.cfg.length).toBe(200)
     })
+  })
+})
+
+// 源自第八轮审查回归(hash 路由导航轨迹,归入 MooClient 模块)。
+describe('③ hash 路由的导航轨迹', () => {
+  it('只改 hash 的跳转也记 from → to(createWebHashHistory 场景)', () => {
+    const records: FrontendErrorRecord[] = []
+    const client = new MooClient({
+      endpoint: 'https://c.test/api/v1', token: 'tok12345',
+      beforeSend: (e) => (records.push(e), null),
+    })
+    history.pushState({}, '', location.pathname + '#/cart')
+    history.pushState({}, '', location.pathname + '#/checkout')
+    client.captureException(new Error('probe'))
+
+    const nav = (records[0].breadcrumbs ?? []).filter((b) => b.category === 'navigation')
+    expect(nav.length).toBeGreaterThanOrEqual(2)
+    expect(nav[nav.length - 1].message).toContain('#/cart → ')
+    expect(nav[nav.length - 1].message).toContain('#/checkout')
+    client.close()
   })
 })
