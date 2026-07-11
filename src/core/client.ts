@@ -1,5 +1,6 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
 import { installDomCrumbs } from './instrument/domCrumbs'
+import { installFlushOnHide } from './instrument/flushOnHide'
 import { installGlobalErrors } from './instrument/globalErrors'
 import { installHistoryCrumbs } from './instrument/historyCrumbs'
 import { installHttpCrumbs } from './instrument/httpCrumbs'
@@ -20,9 +21,6 @@ export class MooClient {
   private installed = false
   // 各插桩模块的卸载函数 —— close() 逐个调用还原(补丁按引用条件还原、哨兵检查等语义内聚在各模块闭包里)。
   private uninstallers: Uninstall[] = []
-  // 监听器引用 —— 供 close() 解绑(否则重复 init / 微前端会泄漏监听器 + 重复上报)。
-  private onVisibility?: () => void
-  private onPagehide?: () => void
 
   constructor(options: MooOptions) {
     this.opts = resolveOptions(options)
@@ -106,12 +104,8 @@ export class MooClient {
         this.opts.onError?.(e)
       }
     }
-    if (typeof window !== 'undefined') {
-      if (this.onVisibility) window.removeEventListener('visibilitychange', this.onVisibility)
-      if (this.onPagehide) window.removeEventListener('pagehide', this.onPagehide)
-    }
     this.installed = false
-    this.opts.enabled = false // 关闭后不再捕获
+    this.opts.enabled = false // 关闭后不再捕获;也是「补丁无法还原时靠 captureException 门禁兜底」的安全网
     return ok
   }
 
@@ -158,29 +152,7 @@ export class MooClient {
     // fetch/XHR 补丁独立于 autoBreadcrumbs 门:HttpError 自动捕获只能靠这两个补丁触发,
     // 不能被「关轨迹」连带静默关掉(P0.1)。补丁内部记轨迹与捕获 HttpError 两个动作各自判断。
     if (this.opts.autoBreadcrumbs || this.opts.httpErrorsMin !== null) this.tryInstall(() => installHttpCrumbs(ctx))
-    try {
-      this.installFlushOnHide()
-    } catch (e) {
-      this.opts.onError?.(e)
-    }
-  }
-
-  private installFlushOnHide(): void {
-    const flush = () => {
-      try {
-        // 卸载时用 sendBeacon(useBeacon=true):比 fetch 更可靠地发出残余队列。
-        this.flush(true)
-      } catch (e) {
-        this.opts.onError?.(e)
-      }
-    }
-    // visibilitychange(hidden)+ pagehide 比已废弃的 unload 更可靠;beacon 在此仍能发出残余队列。
-    this.onVisibility = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flush()
-    }
-    this.onPagehide = flush
-    window.addEventListener('visibilitychange', this.onVisibility)
-    window.addEventListener('pagehide', this.onPagehide)
+    this.tryInstall(() => installFlushOnHide(ctx))
   }
 
   private checkSourcemapRelease(): void {
