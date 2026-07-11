@@ -2,6 +2,7 @@ import { BreadcrumbBuffer } from './breadcrumbs'
 import { debugIdForFile } from './debugIds'
 import { installDomCrumbs } from './instrument/domCrumbs'
 import { installGlobalErrors } from './instrument/globalErrors'
+import { installHistoryCrumbs } from './instrument/historyCrumbs'
 import type { InstrumentCtx, Uninstall } from './instrument/types'
 import { normalize } from './normalize'
 import { parseStack } from './stacktrace'
@@ -24,7 +25,6 @@ export class MooClient {
   // 各插桩模块的卸载函数 —— close() 逐个调用还原(补丁按引用条件还原、哨兵检查等语义内聚在各模块闭包里)。
   private uninstallers: Uninstall[] = []
   // 监听器 / 补丁引用 —— 供 close() 解绑还原(否则重复 init / 微前端会泄漏监听器 + 重复上报)。
-  private onPopstate?: EventListener
   private onVisibility?: () => void
   private onPagehide?: () => void
   private origFetch?: typeof fetch
@@ -33,14 +33,8 @@ export class MooClient {
   private origXhrSend?: typeof XMLHttpRequest.prototype.send
   private patchedXhrOpen?: typeof XMLHttpRequest.prototype.open
   private patchedXhrSend?: typeof XMLHttpRequest.prototype.send
-  private origPushState?: History['pushState']
-  private origReplaceState?: History['replaceState']
-  private patchedPushState?: History['pushState']
-  private patchedReplaceState?: History['replaceState']
   /** fetch 轨迹折叠:连续同一请求(轮询)合成一条 ×N,不让 30 格轨迹被 fetch 刷满、挤掉交互上下文。 */
   private lastFetch: { key: string; n: number } | null = null
-  /** popstate(后退/前进)的 from 路径。 */
-  private lastPath = ''
 
   constructor(options: MooOptions) {
     this.opts = resolveOptions(options)
@@ -125,13 +119,10 @@ export class MooClient {
       }
     }
     if (typeof window !== 'undefined') {
-      if (this.onPopstate) window.removeEventListener('popstate', this.onPopstate)
       if (this.onVisibility) window.removeEventListener('visibilitychange', this.onVisibility)
       if (this.onPagehide) window.removeEventListener('pagehide', this.onPagehide)
       // 仅当当前补丁仍是本实例打的才还原(别覆盖他人后续的补丁)。
       if (this.origFetch && (window.fetch as AnyFetch) === this.patchedFetch) window.fetch = this.origFetch
-      if (this.origPushState && window.history.pushState === this.patchedPushState) window.history.pushState = this.origPushState
-      if (this.origReplaceState && window.history.replaceState === this.patchedReplaceState) window.history.replaceState = this.origReplaceState
       if (typeof XMLHttpRequest !== 'undefined') {
         if (this.origXhrOpen && XMLHttpRequest.prototype.open === this.patchedXhrOpen) XMLHttpRequest.prototype.open = this.origXhrOpen
         if (this.origXhrSend && XMLHttpRequest.prototype.send === this.patchedXhrSend) XMLHttpRequest.prototype.send = this.origXhrSend
@@ -173,9 +164,11 @@ export class MooClient {
     this.installed = true
     const ctx = this.makeCtx()
     if (this.opts.autoCapture) this.tryInstall(() => installGlobalErrors(ctx))
-    if (this.opts.autoBreadcrumbs) this.tryInstall(() => installDomCrumbs(ctx))
+    if (this.opts.autoBreadcrumbs) {
+      this.tryInstall(() => installDomCrumbs(ctx))
+      this.tryInstall(() => installHistoryCrumbs(ctx))
+    }
     try {
-      if (this.opts.autoBreadcrumbs) this.installNavigationBreadcrumbs()
       // fetch/XHR 补丁独立于 autoBreadcrumbs 门:HttpError 自动捕获只能靠这两个补丁触发,
       // 不能被「关轨迹」连带静默关掉(P0.1)。补丁内部记轨迹与捕获 HttpError 两个动作各自判断。
       if (this.opts.autoBreadcrumbs || this.opts.httpErrorsMin !== null) this.installHttpInstrumentation()
@@ -225,48 +218,6 @@ export class MooClient {
       this.patchedFetch = patched
       window.fetch = patched
     }
-  }
-
-  /**
-   * 路由轨迹:包裹 history.pushState/replaceState(SPA 路由都走这两个)+ popstate(后退/前进),
-   * 记 `from → to`(pathname+search,出站时统一脱敏)。哨兵防重复包裹;close() 按引用还原。
-   */
-  private installNavigationBreadcrumbs(): void {
-    const h = window.history as History | undefined
-    if (!h || typeof h.pushState !== 'function') return
-
-    // 路径含 hash:hash 路由(createWebHashHistory)的跳转只改 location.hash,
-    // 不带它的话 to===from,整个 hash 模式应用一条导航轨迹都记不到。
-    const cur = () => location.pathname + location.search + location.hash
-    this.lastPath = cur()
-    const record = (from: string) => {
-      const to = cur()
-      if (to !== from) {
-        this.lastPath = to
-        this.addBreadcrumb({ category: 'navigation', message: `${from} → ${to}` })
-      }
-    }
-
-    type PatchedFn = History['pushState'] & { __mooPatched?: boolean }
-    if (!(h.pushState as PatchedFn).__mooPatched) {
-      this.origPushState = h.pushState
-      this.origReplaceState = h.replaceState
-      const wrap = (orig: History['pushState']): History['pushState'] => {
-        const fn = function (this: History, ...args: Parameters<History['pushState']>) {
-          const from = cur()
-          const ret = orig.apply(this, args)
-          record(from) // record 是箭头函数,this 已绑定客户端实例
-          return ret
-        } as PatchedFn
-        fn.__mooPatched = true
-        return fn
-      }
-      this.patchedPushState = h.pushState = wrap(this.origPushState)
-      this.patchedReplaceState = h.replaceState = wrap(this.origReplaceState)
-    }
-
-    this.onPopstate = () => record(this.lastPath)
-    window.addEventListener('popstate', this.onPopstate)
   }
 
   /**
