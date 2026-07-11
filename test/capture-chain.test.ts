@@ -347,6 +347,33 @@ describe('XHR 插桩与请求忽略名单(0.3.12)', () => {
     XMLHttpRequest.prototype.send = origSend
   })
 
+  it('同一 XHR 实例连续两轮 open/send 不双计、不张冠李戴(P0.2)', async () => {
+    const origSend = XMLHttpRequest.prototype.send
+    XMLHttpRequest.prototype.send = function () {
+      setTimeout(() => {
+        Object.defineProperty(this, 'status', { value: 200, configurable: true })
+        this.dispatchEvent(new Event('loadend'))
+      }, 0)
+    }
+
+    const { client, crumbsNow } = makeClient({ httpErrors: false })
+    const xhr = new XMLHttpRequest()
+    xhr.open('get', 'https://api.test/a')
+    xhr.send()
+    await new Promise((r) => setTimeout(r, 5))
+    xhr.open('post', 'https://api.test/b') // 同一实例复用(轮询/长连接封装常见)
+    xhr.send()
+    await new Promise((r) => setTimeout(r, 5))
+
+    const fetches = crumbsNow().filter((b) => b.category === 'fetch')
+    expect(fetches).toHaveLength(2) // 此前第二轮 loadend 会触发两个监听 → 3 条且第二条 URL 错乱
+    expect(fetches[0].message).toBe('GET https://api.test/a 200')
+    expect(fetches[1].message).toBe('POST https://api.test/b 200') // 用各自请求的 method/url,不复用第一次的
+
+    client.close()
+    XMLHttpRequest.prototype.send = origSend
+  })
+
   it('第三方统计 URL 默认忽略(GA 不再刷屏轨迹);传 [] 可保留', async () => {
     const mk = () => vi.fn(() => Promise.resolve({ ok: true, status: 200 } as Response))
     vi.stubGlobal('fetch', mk())

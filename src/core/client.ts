@@ -364,13 +364,20 @@ export class MooClient {
         if (meta && meta.url && meta.url.indexOf(intake) === -1 && !isIgnoredFetchUrl(meta.url)) {
           // 仅开轨迹时同步留存栈(loadend 回调里业务调用方已不在栈上);只开 httpErrors 时不采,纯优化(P0.1)。
           meta.stack = recordCrumbs ? new Error().stack : undefined
-          this.addEventListener('loadend', () => {
-            try {
-              httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
-            } catch (e) {
-              onError(e)
-            }
-          })
+          // once:同一 XHR 实例合法复用(open→send→loadend→open→send)时,不加 once 则第二次
+          // loadend 会连同旧监听一起触发 —— 旧监听闭包持第一次请求的 meta、用第二次的 status 落格,
+          // 一次请求两条 crumb、HttpError 双计且 URL 张冠李戴(P0.2)。
+          this.addEventListener(
+            'loadend',
+            () => {
+              try {
+                httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
+              } catch (e) {
+                onError(e)
+              }
+            },
+            { once: true },
+          )
         }
       } catch (e) {
         onError(e)
