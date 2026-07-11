@@ -186,6 +186,23 @@ describe('HTTP 响应错误自动捕获', () => {
     await window.fetch('https://c.test/api/v1/frontend-errors/intake')
     expect(records.find((r) => r.error.name === 'HttpError')).toBeUndefined()
   })
+
+  it('httpErrors 独立于 autoBreadcrumbs:关轨迹仍捕获 HttpError;关 httpErrors 仅留轨迹(P0.1)', async () => {
+    // 正向:autoBreadcrumbs:false + httpErrors 开 —— 仍捕获 HttpError,但不记 fetch 轨迹
+    withFetch(500)
+    const { records } = makeClient({ autoBreadcrumbs: false, httpErrors: { min: 400 } })
+    await window.fetch('https://api.test/orders')
+    const http = records.find((r) => r.error.name === 'HttpError')
+    expect(http?.error.message).toBe('GET https://api.test/orders 500')
+    expect((http?.breadcrumbs ?? []).some((b) => b.category === 'fetch')).toBe(false) // 轨迹被关
+
+    // 反向:autoBreadcrumbs:true + httpErrors:false —— 只有 fetch 轨迹,无 HttpError
+    withFetch(500)
+    const { records: r2, crumbsNow } = makeClient({ autoBreadcrumbs: true, httpErrors: false })
+    await window.fetch('https://api.test/y')
+    expect(r2.find((r) => r.error.name === 'HttpError')).toBeUndefined()
+    expect(crumbsNow().find((b) => b.category === 'fetch')).toBeTruthy()
+  })
 })
 
 describe('session 自动化', () => {

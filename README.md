@@ -91,7 +91,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `autoBreadcrumbs` | `true` | 自动记录点击 / 键盘 / 路由 / fetch 轨迹(键盘只记按键与目标,绝不记内容) |
 | `autoSession` | `true` | 自动生成会话 ID(sessionStorage,标签页生命周期);`setUser({ sessionId })` 优先 |
 | `releaseCheck` | `false` | 可选 release 自检。`true` 或 `{ sampleRate, app }` 会用前端错误 token 查询云端 sourcemap 健康摘要,建议开发/灰度开启 |
-| `httpErrors` | `true` | fetch 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭 |
+| `httpErrors` | `true` | fetch/XHR 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭。**独立于 `autoBreadcrumbs` 生效**——关轨迹不会连带关掉 HTTP 错误捕获;要完全不打 fetch/XHR 补丁,需同时设 `httpErrors: false` |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
 | `ignoreFetchUrls` | 内置统计域名 | 请求轨迹忽略名单(GA/GTM/百度统计/友盟/神策等默认忽略,传 `[]` 全保留) |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |

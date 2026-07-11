@@ -81,8 +81,11 @@ describe('MooClient auto-capture', () => {
     // @ts-expect-error 测试注入 fetch
     window.fetch = fetchMock
 
-    new MooClient({ ...OPTS, release: 'v1-aabbccdd', autoBreadcrumbs: false, releaseCheck: true, onError })
+    // P0.1 后 autoBreadcrumbs:false 仍会打 fetch/XHR 补丁(httpErrors 默认开)→ 必须 close(),
+    // 否则 __mooPatched 哨兵与 XHR 原型补丁残留会污染后续用例。
+    const client = new MooClient({ ...OPTS, release: 'v1-aabbccdd', autoBreadcrumbs: false, releaseCheck: true, onError })
     expect(fetchMock).toHaveBeenCalledWith('https://c.test/api/v1/sourcemaps/check', expect.objectContaining({ method: 'POST' }))
     await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('has no sourcemap artifacts') })))
+    client.close()
   })
 })

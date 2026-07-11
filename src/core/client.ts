@@ -150,6 +150,9 @@ export class MooClient {
     try {
       if (this.opts.autoCapture) this.installGlobalHandlers()
       if (this.opts.autoBreadcrumbs) this.installBreadcrumbs()
+      // fetch/XHR 补丁独立于 autoBreadcrumbs 门:HttpError 自动捕获只能靠这两个补丁触发,
+      // 不能被「关轨迹」连带静默关掉(P0.1)。补丁内部记轨迹与捕获 HttpError 两个动作各自判断。
+      if (this.opts.autoBreadcrumbs || this.opts.httpErrorsMin !== null) this.installHttpInstrumentation()
       this.installFlushOnHide()
       this.checkSourcemapRelease()
     } catch (e) {
@@ -237,6 +240,14 @@ export class MooClient {
     window.addEventListener('keydown', this.onKeydown, true)
 
     this.installNavigationBreadcrumbs()
+  }
+
+  /**
+   * fetch / XHR 插桩(HTTP 轨迹 + HttpError 捕获)—— 独立于 autoBreadcrumbs 门安装:
+   * HttpError 自动捕获只能由这两个补丁触发,不能被「关轨迹」连带静默关掉(P0.1)。
+   * 补丁内部两个动作各自判断:记轨迹仅当 autoBreadcrumbs;捕获 HttpError 仅当 httpErrorsMin!==null(见 httpCrumb)。
+   */
+  private installHttpInstrumentation(): void {
     this.installXhrBreadcrumbs()
 
     // fetch:记录 method/url/status 作 breadcrumb;排除上报自身 URL,防死循环。
@@ -253,7 +264,8 @@ export class MooClient {
         const skip = !url || url.indexOf(self) !== -1 || this.isIgnoredFetchUrl(url)
         // 调用栈须在【此刻】同步留存(仅一行栈字符串,微秒级):响应回调跑在微任务里,
         // 那时栈上只剩 SDK 自己,业务调用方早已不在 —— 在回调里采帧会把「发起于」指向 SDK。
-        const callStack = skip ? undefined : new Error().stack
+        // 仅在开轨迹时采:callStack 唯一消费方是 fetchCrumb 的 error 帧,只开 httpErrors 时白采一次栈是纯浪费(P0.1)。
+        const callStack = skip || !this.opts.autoBreadcrumbs ? undefined : new Error().stack
         return orig(...args).then(
           (res) => {
             if (!skip) this.httpCrumb(method, url, res.status, callStack)
@@ -329,6 +341,7 @@ export class MooClient {
     const origXhrOpen = this.origXhrOpen
     const origXhrSend = this.origXhrSend
     const intake = this.intakeUrl
+    const recordCrumbs = this.opts.autoBreadcrumbs // 只开 httpErrors 时不采栈(纯优化,P0.1)
     const isIgnoredFetchUrl = (url: string) => this.isIgnoredFetchUrl(url)
     const httpCrumb = (method: string, url: string, status: number | 'failed', callStack?: string) =>
       this.httpCrumb(method, url, status, callStack)
@@ -349,7 +362,8 @@ export class MooClient {
       try {
         const meta = this.__moo
         if (meta && meta.url && meta.url.indexOf(intake) === -1 && !isIgnoredFetchUrl(meta.url)) {
-          meta.stack = new Error().stack // 同步留存:loadend 回调里业务调用方已不在栈上
+          // 仅开轨迹时同步留存栈(loadend 回调里业务调用方已不在栈上);只开 httpErrors 时不采,纯优化(P0.1)。
+          meta.stack = recordCrumbs ? new Error().stack : undefined
           this.addEventListener('loadend', () => {
             try {
               httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
@@ -383,7 +397,10 @@ export class MooClient {
    */
   private httpCrumb(method: string, url: string, status: number | 'failed', callStack?: string): void {
     const failed = status === 'failed' || status === 0
-    this.fetchCrumb(`${method} ${url} ${failed ? 'failed' : status}`, failed || (status as number) >= 400 ? 'error' : 'info', callStack)
+    // 记轨迹仅当开 autoBreadcrumbs;HttpError 捕获独立判断(P0.1:两个动作解耦,只开 httpErrors 时不记轨迹)。
+    if (this.opts.autoBreadcrumbs) {
+      this.fetchCrumb(`${method} ${url} ${failed ? 'failed' : status}`, failed || (status as number) >= 400 ? 'error' : 'info', callStack)
+    }
     // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
     // 丢弃 SDK 内部帧。指纹按 名称+消息 聚合 —— URL 去掉 query/hash 再进消息:
     // 否则每个 query 组合一个指纹(轮询/搜索/游标场景),客户端合并失效 + 云端配额被刷爆。
