@@ -250,7 +250,8 @@ declare const __MOO_RELEASE__: string
 `build_id` 只由本 output 的 map 文件名单哈希得出。同一 `release` + `app` 下,第二个 output(典型:legacy 链)
 会以不同 `build_id` 触发云端「构建集替换」,把前一个 output(现代链)的 map 整组清掉,且 `strict` 查不出来。
 **务必为每个 output / 每个应用传入不同的 `app`** 加以区分(如 `modern` / `legacy`);插件检测到同进程内
-`build_id` 变化会 `warn` 提示。
+`build_id` 变化会 `warn` 提示。另:自定义 `entryFileNames` 时避免不同目录产出同名 `.map` —— 上传与归档都只按
+`basename` 处理,重名会导致归档互相覆盖、云端匹配二义(插件检测到重名 basename 亦会 `warn`)。
 
 **4)或裸 API**(非 Vite 项目,CI 里 curl):
 

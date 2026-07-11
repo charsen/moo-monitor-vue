@@ -201,6 +201,23 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         return
       }
 
+      // basename 冲突检测(P3.6,不改行为):上传(files[])与归档都只按 basename 处理,自定义 entryFileNames
+      // 产出不同目录同名 map 时归档互相覆盖、云端匹配二义(debug_id 能救栈匹配,救不了归档丢失)。命中即告警。
+      {
+        const byBase = new Map<string, string[]>()
+        for (const n of names) {
+          const b = basename(n)
+          const arr = byBase.get(b)
+          if (arr) arr.push(n)
+          else byBase.set(b, [n])
+        }
+        for (const [b, group] of byBase) {
+          if (group.length > 1) {
+            warn(`不同目录下存在同名 map「${b}」(${group.join(', ')})—— 上传/归档只按 basename 处理,会互相覆盖、云端匹配二义;请避免跨目录重名产物或用 include 收窄。`)
+          }
+        }
+      }
+
       // Debug ID 注入(上传前):产物与 map 内容级强绑定,云端优先按 ID 匹配。
       if (opts.injectDebugIds !== false) {
         let injected = 0

@@ -207,6 +207,18 @@ describe('mooSourcemapUpload', () => {
     expect(warns).toContain('多次 writeBundle')
     expect(warns).toContain('app')
   })
+
+  it('不同目录同名 .map:检测 basename 冲突并告警(P3.6)', async () => {
+    const { dir, bundle } = await setupDist({
+      'modern/index.js.map': '{}',
+      'legacy/index.js.map': '{}', // 不同目录、同 basename
+    })
+    await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), dir, bundle)
+
+    const warns = vi.mocked(console.warn).mock.calls.map((c) => String(c[0])).join('\n')
+    expect(warns).toContain('index.js.map')
+    expect(warns).toMatch(/同名|覆盖|二义/)
+  })
 })
 
 describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () => {
