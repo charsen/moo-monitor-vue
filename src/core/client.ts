@@ -13,6 +13,13 @@ import { Scope } from './scope'
 import { autoSessionId } from './session'
 import { resolveOptions, type Breadcrumb, type CaptureHint, type FrontendErrorRecord, type MooOptions, type MooUser, type ResolvedOptions } from './types'
 
+/**
+ * 总装 + 命令式 API —— 五路自动插桩已全部拆到 instrument/ 各模块,本类只负责:
+ * ① 构造(resolveOptions / Queue / BreadcrumbBuffer / intakeUrl);
+ * ② 命令式 API(capture* / set* / addBreadcrumb / flush / close),capture 管道原样保留;
+ * ③ install() 按开关把各模块的 Uninstall 收进 uninstallers,close() 逐个还原。
+ * 「打补丁 → 按引用条件还原」的生命周期内聚在各模块闭包里,不再摊平成 17 个类字段。
+ */
 export class MooClient {
   private opts: ResolvedOptions
   private intakeUrl: string
@@ -156,7 +163,6 @@ export class MooClient {
     if (this.opts.autoBreadcrumbs || this.opts.httpErrorsMin !== null) this.tryInstall(() => installHttpCrumbs(ctx))
     this.tryInstall(() => installFlushOnHide(ctx))
   }
-
 }
 
 // ---- 模块级单例:供非组件代码直接调用 ----
