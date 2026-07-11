@@ -19,12 +19,8 @@ export function interactiveTarget(el: Element | null): Element | null {
   return el
 }
 
-/** 是否可编辑目标(打字聚合判定用)。 */
+/** 是否可编辑/输入类目标(打字聚合判定 + hintOf 取 name/placeholder;输入控件绝不取值)。 */
 export function isEditable(el: Element): boolean {
-  return isInputLike(el)
-}
-
-function isInputLike(el: Element): boolean {
   return (
     el.tagName === 'INPUT' ||
     el.tagName === 'TEXTAREA' ||
@@ -73,7 +69,7 @@ function firstText(el: Element): string {
 function hintOf(el: Element): string {
   const aria = el.getAttribute?.('aria-label') || el.getAttribute?.('title')
   if (aria) return ` "${aria.slice(0, 24)}"`
-  if (isInputLike(el)) {
+  if (isEditable(el)) {
     const name = el.getAttribute?.('name')
     if (name) return `[name=${name.slice(0, 24)}]`
     const ph = el.getAttribute?.('placeholder')
