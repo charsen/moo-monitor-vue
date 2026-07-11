@@ -101,7 +101,7 @@ describe('normalize', () => {
   })
 })
 
-// 源自第七/第九轮审查回归(指纹稳定 / stableFile,归入 normalize 模块)。
+// 源自第七轮审查回归(指纹跨发版稳定,归入 normalize 模块)。
 describe('② 指纹跨发版稳定(剥离产物内容 hash)', () => {
   const withStack = (file: string) => {
     const e = new Error('boom')
@@ -118,5 +118,21 @@ describe('② 指纹跨发版稳定(剥离产物内容 hash)', () => {
     const legacy = normalize(withStack('main-legacy.js'), {})
     const modern = normalize(withStack('main.js'), {})
     expect(legacy.hash).not.toBe(modern.hash)
+  })
+})
+
+// 源自第九轮审查回归(stableFile 不误伤人工命名,兼容 .min.js)。
+describe('④ stableFile:不误伤人工命名,兼容 .min.js', () => {
+  const withStack = (file: string) => {
+    const e = new Error('boom')
+    e.stack = `Error: boom\n    at render (https://x.test/assets/${file}:1:100)`
+    return e
+  }
+
+  it('user-settings.js(无数字)不再被剥;.min.js 带 hash 的也能剥', () => {
+    // 人工命名:settings 段无数字 → 保留,与真 user.js 指纹不同
+    expect(normalize(withStack('user-settings.js'), {}).hash).not.toBe(normalize(withStack('user.js'), {}).hash)
+    // .min.js:hash 段照剥 → 跨发版稳定
+    expect(normalize(withStack('app-Df3kZ2L0.min.js'), {}).hash).toBe(normalize(withStack('app-Aa1Bb2Cc.min.js'), {}).hash)
   })
 })

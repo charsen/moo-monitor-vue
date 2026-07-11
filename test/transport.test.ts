@@ -110,6 +110,44 @@ describe('投递硬化:缓冲上限与超大记录(源自第8轮)', () => {
   })
 })
 
+// 源自第9轮审查回归(截断分级丢弃 / 滞留路径补 arm,真 transport)。
+describe('投递硬化:分级截断与滞留补 arm(源自第9轮)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('截断二轮先丢 payload,frames/breadcrumbs 得以保住', () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 200, headers: { get: () => null } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const q = new Queue('https://c.test/x', 'tok', 999999, 999999)
+    q.add({
+      hash: 'aaaaaaaaaaaa',
+      error: { name: 'E', message: 'm', handled: false, severity: 'error' },
+      page: {}, client: {}, context: {},
+      frames: [{ file: 'app.js', line: 1, column: 1, function: 'f' }],
+      breadcrumbs: [{ category: 'click', message: 'b' }],
+      payload: { extra: { huge: 'x'.repeat(60000) } }, // 肇事者是 payload
+    } as FrontendErrorRecord)
+    q.flush()
+
+    const sent = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string).records[0]
+    expect(sent.payload).toBeUndefined()       // 只丢 payload
+    expect(sent.frames).toBeTruthy()           // 栈保住了(此前连坐被丢)
+    expect(sent.breadcrumbs).toBeTruthy()      // 轨迹保住了
+  })
+
+  it('422 丢弃后自动安排下一轮 flush,onDrop 不需要等新错误才响', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 422, headers: { get: () => null } })))
+    const drops: number[] = []
+    const q = new Queue('https://c.test/x', 'tok', 50, 20, (n) => drops.push(n))
+    q.add({ hash: 'aaaaaaaaaaaa', error: { name: 'E', message: 'm', handled: false, severity: 'error' }, page: {}, client: {}, context: {} } as FrontendErrorRecord)
+    q.flush()
+    await vi.advanceTimersByTimeAsync(10) // 让 fetch then 落地(rejected → dropped+arm)
+    await vi.advanceTimersByTimeAsync(60) // 到点自动 flush → 上报 dropped
+    expect(drops).toEqual([1])
+    vi.useRealTimers()
+  })
+})
+
 // 退避是 transport 模块级状态:设退避(429)的用例必须排在文件最后,否则串染其余用例。
 describe('退避语义(设退避,须在文件最后)', () => {
   afterEach(() => vi.unstubAllGlobals())

@@ -320,6 +320,39 @@ describe('⑤ Vite 插件失败处理', () => {
   })
 })
 
+// 源自第九轮审查回归(删 map 后剥 sourceMappingURL 注释)。
+describe('② Vite 插件:删 map 后剥 sourceMappingURL 注释', () => {
+  const OPTS = { endpoint: 'https://cloud.test/api/v1', token: 'ci', release: '1.0.0', deleteAfterUpload: true }
+  const ok = () => new Response(JSON.stringify({ ok: true, saved: 1, skipped: 0, errors: {} }), { status: 200 })
+
+  async function run(sourcemapSetting: boolean | 'hidden') {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-r9-'))
+    await writeFile(join(dir, 'a.js'), 'console.log(1)\n//# sourceMappingURL=a.js.map\n')
+    await writeFile(join(dir, 'a.js.map'), '{}')
+    vi.stubGlobal('fetch', vi.fn(async () => ok()))
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const plugin = mooSourcemapUpload(OPTS)
+    ;(plugin.configResolved as (c: unknown) => void)({ build: { sourcemap: sourcemapSetting } })
+    await (plugin.writeBundle as (o: unknown, b: unknown) => Promise<void>)({ dir }, { 'a.js.map': {}, 'a.js': {} })
+    return dir
+  }
+
+  it("sourcemap:true → 删 map 同时剥掉 JS 尾部注释(不再 404);'hidden' 不动 JS", async () => {
+    const dir = await run(true)
+    expect(await readdir(dir)).toEqual(['a.js'])
+    const js = await readFile(join(dir, 'a.js'), 'utf8')
+    expect(js).not.toContain('sourceMappingURL') // 注释被剥
+    expect(js).toContain('console.log(1)')
+    vi.restoreAllMocks()
+
+    const dir2 = await run('hidden')
+    const js2 = await readFile(join(dir2, 'a.js'), 'utf8')
+    expect(js2).toContain('sourceMappingURL') // hidden 下 JS 本就不该被碰(此处文件是手造的)
+    vi.restoreAllMocks()
+  })
+})
+
 describe('resolveMooRelease', () => {
   async function git(cwd: string, args: string[]) {
     const { stdout } = await execFileAsync('git', args, { cwd })

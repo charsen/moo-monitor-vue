@@ -111,3 +111,23 @@ describe('④ Vue Router 错误不再双重捕获', () => {
     expect(records).toHaveLength(2)
   })
 })
+
+// 源自第九轮审查回归(__mooSeen 内部标记不泄漏进数据/指纹,归入 vue 插件模块)。
+describe('③ __mooSeen 不泄漏进非 Error 抛掷物的消息', () => {
+  afterEach(() => getClient()?.close())
+
+  it('router.onError 标记后,对象序列化出的 message 不含内部标记', () => {
+    const records: FrontendErrorRecord[] = []
+    let handler: ((e: unknown) => void) | undefined
+    const app = { provide: vi.fn(), config: { globalProperties: {} as Record<string, unknown>, errorHandler: undefined } }
+    ;(MooMonitor as { install: (a: unknown, o: unknown) => void }).install(app, {
+      endpoint: 'https://c.test/api/v1', token: 'tok12345',
+      beforeSend: (e: FrontendErrorRecord) => (records.push(e), null),
+      router: { onError: (h: (e: unknown) => void) => (handler = h) },
+    })
+
+    handler!({ code: 403, reason: 'forbidden' }) // 非 Error 抛掷物
+    expect(records[0].error.message).toContain('403')
+    expect(records[0].error.message).not.toContain('__mooSeen') // 内部标记不进数据/指纹
+  })
+})
