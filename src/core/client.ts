@@ -432,6 +432,7 @@ export class MooClient {
    * 云端在还原栈帧的同一遍解析里把它还原成「发起于 src/api/login.ts:42」。
    */
   private fetchCrumb(key: string, level: Breadcrumb['level'], callStack?: string): void {
+    key = scrub(key) // 先脱敏后截断(P0.3):折叠路径直接改写 message、绕过 BreadcrumbBuffer.add,残端须在此就地脱敏
     if (key.length > 280) key = key.slice(0, 280) + '…' // data: 巨串 URL;折叠路径直接改写 message,须在此截
     const last = this.crumbs.last()
     if (this.lastFetch?.key === key && last && last.category === 'fetch') {

@@ -113,6 +113,20 @@ describe('点击 / 键盘 / 路由 行为链路', () => {
     makeClient()
     expect(history.pushState).toBe(once)
   })
+
+  it('导航轨迹里的 JWT 先脱敏后截断,不泄漏 payload 段(P0.3,隐私)', () => {
+    const { client, crumbsNow } = makeClient()
+    // OIDC 隐式流回调:#id_token=<三段长 JWT>(上千字符,若先截断会把 JWT 拦腰截成两段绕过出站 scrub)
+    const jwt =
+      'eyJhbGciOiJIUzI1NiJ9.' + 'eyJzdWIiOiJ1c2VyMTIzIiwibmFtZSI6IkFsaWNlIn0'.repeat(20) + '.' + 'sig'.repeat(30)
+    history.pushState({}, '', location.pathname + '#id_token=' + jwt)
+
+    const nav = crumbsNow().filter((b) => b.category === 'navigation')
+    const msg = nav.map((b) => b.message).join('\n')
+    expect(msg).toContain('***') // JWT 已打码
+    expect(msg).not.toContain('eyJ') // header/payload 明文一段都不出现
+    client.close()
+  })
 })
 
 describe('HTTP 响应错误自动捕获', () => {

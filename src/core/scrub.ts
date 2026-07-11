@@ -7,9 +7,10 @@ const PATTERNS: Array<[RegExp, string]> = [
   [/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '***JWT***'],
   // Bearer <token>
   [/\bBearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***'],
-  // key=value / key: value(保留键名,值打码)—— 覆盖 URL query 与普通文本
+  // key=value / key: value(保留键名,值打码)—— 覆盖 URL query 与普通文本。
+  // id[_-]?token / jwt 单列:\btoken\b 因下划线是词字符匹配不进 id_token,截断残端(非完整三段 JWT)只能靠键名打码(P0.3)。
   [
-    /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization)\b(\s*["']?\s*[:=]\s*["']?)([^\s"',&;]+)/gi,
+    /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|jwt|authorization)\b(\s*["']?\s*[:=]\s*["']?)([^\s"',&;]+)/gi,
     '$1$2***',
   ],
 ]
