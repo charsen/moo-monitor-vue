@@ -253,6 +253,10 @@ declare const __MOO_RELEASE__: string
 `build_id` 变化会 `warn` 提示。另:自定义 `entryFileNames` 时避免不同目录产出同名 `.map` —— 上传与归档都只按
 `basename` 处理,重名会导致归档互相覆盖、云端匹配二义(插件检测到重名 basename 亦会 `warn`)。
 
+**与 SRI 完整性哈希插件不可同时启用**:`injectDebugIds`(默认开)在 `writeBundle` 阶段改写产物 JS(头部注入
+注册 snippet),而 `vite-plugin-sri` 等在 `generateBundle` 阶段就已算好各 chunk 的 `integrity` 哈希 —— JS 被改写后
+哈希对不上,浏览器会**拒载全部 chunk**。二者互斥:要用 SRI 请设 `injectDebugIds: false`(退回 release + 文件名匹配)。
+
 **4)或裸 API**(非 Vite 项目,CI 里 curl):
 
 ```bash
