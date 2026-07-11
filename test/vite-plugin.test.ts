@@ -194,6 +194,19 @@ describe('mooSourcemapUpload', () => {
     await run(mooSourcemapUpload({ ...OPTS, token: '' }), dir, bundle)
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('多 output 构建(同插件实例二次 writeBundle,build_id 不同)告警互清构建集(P3.5)', async () => {
+    const plugin = mooSourcemapUpload({ ...OPTS, injectDebugIds: false })
+    const modern = await setupDist({ 'modern-a.js.map': '{}' })
+    const legacy = await setupDist({ 'legacy-b.js.map': '{}' }) // 不同文件名 → 不同 build_id
+
+    await run(plugin, modern.dir, modern.bundle) // 首个 output:记录 build_id,不告警
+    await run(plugin, legacy.dir, legacy.bundle) // 第二个 output:build_id 不同 → 告警
+
+    const warns = vi.mocked(console.warn).mock.calls.map((c) => String(c[0])).join('\n')
+    expect(warns).toContain('多次 writeBundle')
+    expect(warns).toContain('app')
+  })
 })
 
 describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () => {

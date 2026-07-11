@@ -246,6 +246,12 @@ declare const __MOO_RELEASE__: string
 解耦;传错构建批次会显式匹配失败而非错位还原。匹配链:`debug_id → (release, 文件名) → 文件名
 项目内唯一回退`。因此 **release 三处一致从「硬约束」降级为「建议」**(老 SDK / curl 上传仍依赖它)。
 
+**多 output / 多应用构建(@vitejs/plugin-legacy、monorepo)**:插件按【每个 rollup output】各跑一次上传,
+`build_id` 只由本 output 的 map 文件名单哈希得出。同一 `release` + `app` 下,第二个 output(典型:legacy 链)
+会以不同 `build_id` 触发云端「构建集替换」,把前一个 output(现代链)的 map 整组清掉,且 `strict` 查不出来。
+**务必为每个 output / 每个应用传入不同的 `app`** 加以区分(如 `modern` / `legacy`);插件检测到同进程内
+`build_id` 变化会 `warn` 提示。
+
 **4)或裸 API**(非 Vite 项目,CI 里 curl):
 
 ```bash
