@@ -1,6 +1,8 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
 import { debugIdForFile } from './debugIds'
 import { describeElement, isEditable, vueComponentName } from './dom'
+import { installGlobalErrors } from './instrument/globalErrors'
+import type { InstrumentCtx, Uninstall } from './instrument/types'
 import { normalize } from './normalize'
 import { parseStack } from './stacktrace'
 import { scrub } from './scrub'
@@ -19,9 +21,9 @@ export class MooClient {
   private crumbs: BreadcrumbBuffer
   private scope = new Scope()
   private installed = false
+  // 各插桩模块的卸载函数 —— close() 逐个调用还原(补丁按引用条件还原、哨兵检查等语义内聚在各模块闭包里)。
+  private uninstallers: Uninstall[] = []
   // 监听器 / 补丁引用 —— 供 close() 解绑还原(否则重复 init / 微前端会泄漏监听器 + 重复上报)。
-  private onErrorEvt?: EventListener
-  private onRejection?: EventListener
   private onClick?: EventListener
   private onKeydown?: EventListener
   private onPopstate?: EventListener
@@ -118,9 +120,15 @@ export class MooClient {
   /** 解绑全部监听器 + 还原 fetch + flush 残余队列 —— 重复 init / 微前端卸载时调用,防泄漏与重复上报。 */
   close(): boolean {
     const ok = this.flush(true)
+    // 各插桩模块逐个还原(单个失败不阻断其余);补丁按引用条件还原的逻辑内聚在各模块 uninstall 里。
+    for (const u of this.uninstallers.splice(0)) {
+      try {
+        u()
+      } catch (e) {
+        this.opts.onError?.(e)
+      }
+    }
     if (typeof window !== 'undefined') {
-      if (this.onErrorEvt) window.removeEventListener('error', this.onErrorEvt, true)
-      if (this.onRejection) window.removeEventListener('unhandledrejection', this.onRejection)
       if (this.onClick) window.removeEventListener('click', this.onClick, true)
       if (this.onKeydown) window.removeEventListener('keydown', this.onKeydown, true)
       if (this.onPopstate) window.removeEventListener('popstate', this.onPopstate)
@@ -144,11 +152,35 @@ export class MooClient {
 
   // ---- 自动接管 ----
 
+  /** 供插桩模块回调总装的窄接口(朴素对象,方法各转发到对应命令式 API)。 */
+  private makeCtx(): InstrumentCtx {
+    return {
+      opts: this.opts,
+      intakeUrl: this.intakeUrl,
+      crumb: (b) => this.addBreadcrumb(b),
+      lastCrumb: () => this.crumbs.last(),
+      capture: (input, hint) => this.captureException(input, hint),
+      flush: (useBeacon) => this.flush(useBeacon),
+      onError: (e) => this.opts.onError?.(e),
+    }
+  }
+
+  /** 装一个插桩模块:各自 try/catch(与 close 对称,一处抛错不连坐其余),收下其 Uninstall。 */
+  private tryInstall(fn: () => Uninstall | undefined): void {
+    try {
+      const u = fn()
+      if (u) this.uninstallers.push(u)
+    } catch (e) {
+      this.opts.onError?.(e)
+    }
+  }
+
   private install(): void {
     if (this.installed) return
     this.installed = true
+    const ctx = this.makeCtx()
+    if (this.opts.autoCapture) this.tryInstall(() => installGlobalErrors(ctx))
     try {
-      if (this.opts.autoCapture) this.installGlobalHandlers()
       if (this.opts.autoBreadcrumbs) this.installBreadcrumbs()
       // fetch/XHR 补丁独立于 autoBreadcrumbs 门:HttpError 自动捕获只能靠这两个补丁触发,
       // 不能被「关轨迹」连带静默关掉(P0.1)。补丁内部记轨迹与捕获 HttpError 两个动作各自判断。
@@ -158,43 +190,6 @@ export class MooClient {
     } catch (e) {
       this.opts.onError?.(e)
     }
-  }
-
-  private installGlobalHandlers(): void {
-    // 捕获阶段(true):既接 JS 运行时错误,也接资源加载错误(后者不冒泡,只能在捕获阶段拿)。
-    this.onErrorEvt = (event: Event) => {
-      const target = event.target as (HTMLElement & { src?: unknown; href?: unknown }) | null
-      // SVG(<image>/<use>)的 href 是 SVGAnimatedString 对象而非字符串 → 取 baseVal,
-      // 否则消息变成 "[object SVGAnimatedString]",所有 SVG 资源失败被并成一条垃圾指纹。
-      const rawUrl = target ? (target.src ?? target.href) : null
-      const url = typeof rawUrl === 'string' ? rawUrl : ((rawUrl as { baseVal?: string } | null)?.baseVal ?? '')
-      if (target && target !== (window as unknown as EventTarget) && target.tagName && url) {
-        this.addBreadcrumb({ category: 'resource', level: 'error', message: `资源加载失败: ${target.tagName} ${url}` })
-        // 同 captureMessage:对象走合成栈路径,不带 SDK 内部帧;name 也更语义化(可按 ResourceError 过滤)。
-        this.captureException(
-          { name: 'ResourceError', message: `Resource failed to load: ${url}` },
-          { handled: false, severity: 'warning', extra: { tag: target.tagName } },
-        )
-        return
-      }
-      const e = event as ErrorEvent
-      // 无原生 Error 对象(只有 message,如 ResizeObserver)时,带上事件的 filename:line:col 作定位帧。
-      this.captureException(e.error || e.message || 'Unknown error', {
-        handled: false,
-        severity: 'error',
-        location: e.error ? undefined : { file: e.filename, line: e.lineno, column: e.colno },
-      })
-    }
-    window.addEventListener('error', this.onErrorEvt, true)
-
-    this.onRejection = (event: Event) => {
-      const reason = (event as PromiseRejectionEvent).reason
-      // Vue Router 的导航错误会同时进 router.onError(插件已捕获并打标)和这里(未被 catch 的
-      // push() 拒绝)—— 同一个 Error 捕两次 → count 翻倍。打过标的跳过。
-      if (reason && typeof reason === 'object' && (reason as { __mooSeen?: boolean }).__mooSeen) return
-      this.captureException(reason ?? 'Unhandled promise rejection', { handled: false, severity: 'error' })
-    }
-    window.addEventListener('unhandledrejection', this.onRejection)
   }
 
   private installBreadcrumbs(): void {
