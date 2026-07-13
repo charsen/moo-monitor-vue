@@ -31,4 +31,27 @@ describe('parseUA', () => {
     )
     expect(r.browser).toBe('Edge')
   })
+
+  // 源自第七轮审查回归。
+  it('iOS 上的 Chrome / Firefox 不再误判成 Safari(CriOS → Chrome;FxiOS → Firefox;真 Safari 不受影响)', () => {
+    const crios = parseUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0.0.0 Mobile/15E148 Safari/604.1')
+    expect(crios.browser).toBe('Chrome')
+    expect(crios.os).toBe('iOS')
+
+    const fxios = parseUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/127.0 Mobile/15E148 Safari/605.1.15')
+    expect(fxios.browser).toBe('Firefox')
+
+    const safari = parseUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')
+    expect(safari.browser).toBe('Safari')
+  })
+
+  // 源自第九轮审查回归(国产内嵌浏览器识别)。
+  it('国产内嵌浏览器识别:微信 / 钉钉 / QQ / UC 不再统统算成 Chrome', () => {
+    const base = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
+    expect(parseUA(`${base} MicroMessenger/8.0.49`).browser).toBe('WeChat')
+    expect(parseUA(`${base} DingTalk/7.5.0`).browser).toBe('DingTalk')
+    expect(parseUA(`${base} MQQBrowser/14.0`).browser).toBe('QQBrowser')
+    expect(parseUA(`${base} UCBrowser/16.3.0`).browser).toBe('UCBrowser')
+    expect(parseUA(base).browser).toBe('Chrome') // 纯 Chrome 不受影响
+  })
 })

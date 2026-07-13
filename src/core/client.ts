@@ -1,17 +1,25 @@
 import { BreadcrumbBuffer } from './breadcrumbs'
-import { debugIdForFile } from './debugIds'
-import { describeElement, isEditable, vueComponentName } from './dom'
+import { installDomCrumbs } from './instrument/domCrumbs'
+import { installFlushOnHide } from './instrument/flushOnHide'
+import { installGlobalErrors } from './instrument/globalErrors'
+import { installHistoryCrumbs } from './instrument/historyCrumbs'
+import { installHttpCrumbs } from './instrument/httpCrumbs'
+import type { InstrumentCtx, Uninstall } from './instrument/types'
 import { normalize } from './normalize'
-import { parseStack } from './stacktrace'
-import { scrub } from './scrub'
 import { Queue } from './queue'
+import { checkSourcemapRelease } from './releaseCheck'
 import { isIgnored, shouldSample } from './sampling'
 import { Scope } from './scope'
 import { autoSessionId } from './session'
 import { resolveOptions, type Breadcrumb, type CaptureHint, type FrontendErrorRecord, type MooOptions, type MooUser, type ResolvedOptions } from './types'
 
-type AnyFetch = typeof fetch & { __mooPatched?: boolean }
-
+/**
+ * 总装 + 命令式 API —— 五路自动插桩已全部拆到 instrument/ 各模块,本类只负责:
+ * ① 构造(resolveOptions / Queue / BreadcrumbBuffer / intakeUrl);
+ * ② 命令式 API(capture* / set* / addBreadcrumb / flush / close),capture 管道原样保留;
+ * ③ install() 按开关把各模块的 Uninstall 收进 uninstallers,close() 逐个还原。
+ * 「打补丁 → 按引用条件还原」的生命周期内聚在各模块闭包里,不再摊平成 17 个类字段。
+ */
 export class MooClient {
   private opts: ResolvedOptions
   private intakeUrl: string
@@ -19,30 +27,8 @@ export class MooClient {
   private crumbs: BreadcrumbBuffer
   private scope = new Scope()
   private installed = false
-  // 监听器 / 补丁引用 —— 供 close() 解绑还原(否则重复 init / 微前端会泄漏监听器 + 重复上报)。
-  private onErrorEvt?: EventListener
-  private onRejection?: EventListener
-  private onClick?: EventListener
-  private onKeydown?: EventListener
-  private onPopstate?: EventListener
-  private onVisibility?: () => void
-  private onPagehide?: () => void
-  private origFetch?: typeof fetch
-  private patchedFetch?: AnyFetch
-  private origXhrOpen?: typeof XMLHttpRequest.prototype.open
-  private origXhrSend?: typeof XMLHttpRequest.prototype.send
-  private patchedXhrOpen?: typeof XMLHttpRequest.prototype.open
-  private patchedXhrSend?: typeof XMLHttpRequest.prototype.send
-  private origPushState?: History['pushState']
-  private origReplaceState?: History['replaceState']
-  private patchedPushState?: History['pushState']
-  private patchedReplaceState?: History['replaceState']
-  /** 打字聚合:同一元素的连续输入只记一条「输入 →」crumb(换元素 / 按 Enter/Escape 后重新计)。 */
-  private lastInputEl: Element | null = null
-  /** fetch 轨迹折叠:连续同一请求(轮询)合成一条 ×N,不让 30 格轨迹被 fetch 刷满、挤掉交互上下文。 */
-  private lastFetch: { key: string; n: number } | null = null
-  /** popstate(后退/前进)的 from 路径。 */
-  private lastPath = ''
+  // 各插桩模块的卸载函数 —— close() 逐个调用还原(补丁按引用条件还原、哨兵检查等语义内聚在各模块闭包里)。
+  private uninstallers: Uninstall[] = []
 
   constructor(options: MooOptions) {
     this.opts = resolveOptions(options)
@@ -118,385 +104,64 @@ export class MooClient {
   /** 解绑全部监听器 + 还原 fetch + flush 残余队列 —— 重复 init / 微前端卸载时调用,防泄漏与重复上报。 */
   close(): boolean {
     const ok = this.flush(true)
-    if (typeof window !== 'undefined') {
-      if (this.onErrorEvt) window.removeEventListener('error', this.onErrorEvt, true)
-      if (this.onRejection) window.removeEventListener('unhandledrejection', this.onRejection)
-      if (this.onClick) window.removeEventListener('click', this.onClick, true)
-      if (this.onKeydown) window.removeEventListener('keydown', this.onKeydown, true)
-      if (this.onPopstate) window.removeEventListener('popstate', this.onPopstate)
-      if (this.onVisibility) window.removeEventListener('visibilitychange', this.onVisibility)
-      if (this.onPagehide) window.removeEventListener('pagehide', this.onPagehide)
-      // 仅当当前补丁仍是本实例打的才还原(别覆盖他人后续的补丁)。
-      if (this.origFetch && (window.fetch as AnyFetch) === this.patchedFetch) window.fetch = this.origFetch
-      if (this.origPushState && window.history.pushState === this.patchedPushState) window.history.pushState = this.origPushState
-      if (this.origReplaceState && window.history.replaceState === this.patchedReplaceState) window.history.replaceState = this.origReplaceState
-      if (typeof XMLHttpRequest !== 'undefined') {
-        if (this.origXhrOpen && XMLHttpRequest.prototype.open === this.patchedXhrOpen) XMLHttpRequest.prototype.open = this.origXhrOpen
-        if (this.origXhrSend && XMLHttpRequest.prototype.send === this.patchedXhrSend) XMLHttpRequest.prototype.send = this.origXhrSend
+    // 各插桩模块逐个还原(单个失败不阻断其余);补丁按引用条件还原的逻辑内聚在各模块 uninstall 里。
+    for (const u of this.uninstallers.splice(0)) {
+      try {
+        u()
+      } catch (e) {
+        this.opts.onError?.(e)
       }
     }
     this.installed = false
-    this.opts.enabled = false // 关闭后不再捕获
-    this.lastInputEl = null // 释放 DOM 引用(微前端卸载后不滞留已脱离的节点)
-    this.lastFetch = null
+    this.opts.enabled = false // 关闭后不再捕获;也是「补丁无法还原时靠 captureException 门禁兜底」的安全网
     return ok
   }
 
   // ---- 自动接管 ----
 
-  private install(): void {
-    if (this.installed) return
-    this.installed = true
+  /** 供插桩模块回调总装的窄接口(朴素对象,方法各转发到对应命令式 API)。 */
+  private makeCtx(): InstrumentCtx {
+    return {
+      opts: this.opts,
+      intakeUrl: this.intakeUrl,
+      crumb: (b) => this.addBreadcrumb(b),
+      lastCrumb: () => this.crumbs.last(),
+      capture: (input, hint) => this.captureException(input, hint),
+      flush: (useBeacon) => this.flush(useBeacon),
+      onError: (e) => this.opts.onError?.(e),
+    }
+  }
+
+  /** 装一个插桩模块:各自 try/catch(与 close 对称,一处抛错不连坐其余),收下其 Uninstall。 */
+  private tryInstall(fn: () => Uninstall | undefined): void {
     try {
-      if (this.opts.autoCapture) this.installGlobalHandlers()
-      if (this.opts.autoBreadcrumbs) this.installBreadcrumbs()
-      this.installFlushOnHide()
-      this.checkSourcemapRelease()
+      const u = fn()
+      if (u) this.uninstallers.push(u)
     } catch (e) {
       this.opts.onError?.(e)
     }
   }
 
-  private installGlobalHandlers(): void {
-    // 捕获阶段(true):既接 JS 运行时错误,也接资源加载错误(后者不冒泡,只能在捕获阶段拿)。
-    this.onErrorEvt = (event: Event) => {
-      const target = event.target as (HTMLElement & { src?: unknown; href?: unknown }) | null
-      // SVG(<image>/<use>)的 href 是 SVGAnimatedString 对象而非字符串 → 取 baseVal,
-      // 否则消息变成 "[object SVGAnimatedString]",所有 SVG 资源失败被并成一条垃圾指纹。
-      const rawUrl = target ? (target.src ?? target.href) : null
-      const url = typeof rawUrl === 'string' ? rawUrl : ((rawUrl as { baseVal?: string } | null)?.baseVal ?? '')
-      if (target && target !== (window as unknown as EventTarget) && target.tagName && url) {
-        this.addBreadcrumb({ category: 'resource', level: 'error', message: `资源加载失败: ${target.tagName} ${url}` })
-        // 同 captureMessage:对象走合成栈路径,不带 SDK 内部帧;name 也更语义化(可按 ResourceError 过滤)。
-        this.captureException(
-          { name: 'ResourceError', message: `Resource failed to load: ${url}` },
-          { handled: false, severity: 'warning', extra: { tag: target.tagName } },
-        )
-        return
-      }
-      const e = event as ErrorEvent
-      // 无原生 Error 对象(只有 message,如 ResizeObserver)时,带上事件的 filename:line:col 作定位帧。
-      this.captureException(e.error || e.message || 'Unknown error', {
-        handled: false,
-        severity: 'error',
-        location: e.error ? undefined : { file: e.filename, line: e.lineno, column: e.colno },
-      })
-    }
-    window.addEventListener('error', this.onErrorEvt, true)
-
-    this.onRejection = (event: Event) => {
-      const reason = (event as PromiseRejectionEvent).reason
-      // Vue Router 的导航错误会同时进 router.onError(插件已捕获并打标)和这里(未被 catch 的
-      // push() 拒绝)—— 同一个 Error 捕两次 → count 翻倍。打过标的跳过。
-      if (reason && typeof reason === 'object' && (reason as { __mooSeen?: boolean }).__mooSeen) return
-      this.captureException(reason ?? 'Unhandled promise rejection', { handled: false, severity: 'error' })
-    }
-    window.addEventListener('unhandledrejection', this.onRejection)
-  }
-
-  private installBreadcrumbs(): void {
-    // 点击:document 级捕获,解析「用户操作的元素」—— 就近交互祖先(点中 button 里的 span 也归到 button)
-    // + 可读选择器 + aria/文本提示(见 dom.ts;输入控件绝不取值)。不存 DOM 引用。
-    // 整体 try/catch:轨迹手柄抛错会冒到 window.onerror 被 SDK 自己捕获成「宿主错误」(自噪音)。
-    this.onClick = (e: Event) => {
-      try {
-        const t = e.target as Element | null
-        if (!t || !t.tagName) return
-        this.lastInputEl = null // 点了别处,下一段输入重新记
-        this.addBreadcrumb({ category: 'click', message: this.describeWithComponent(t) })
-      } catch (err) {
-        this.opts.onError?.(err)
-      }
-    }
-    window.addEventListener('click', this.onClick, true)
-
-    // 键盘:只记两类、绝不记输入内容 ——
-    //   ① Enter / Escape(提交、取消的关键节点);
-    //   ② 可编辑元素上的「开始输入」(同一元素的连续打字聚合成一条,只记目标不记值)。
-    this.onKeydown = (e: Event) => {
-      try {
-        const ke = e as KeyboardEvent
-        // 扩展/测试工具会用普通 Event 派发 keydown(无 .key)→ 兜成空串,绝不抛。
-        const key = typeof ke.key === 'string' ? ke.key : ''
-        const t = ke.target as Element | null
-        if (key === 'Enter' || key === 'Escape') {
-          this.lastInputEl = null
-          this.addBreadcrumb({ category: 'key', message: `${key} → ${this.describeWithComponent(t)}` })
-          return
-        }
-        if (ke.ctrlKey || ke.metaKey || ke.altKey) return // 快捷键不算输入
-        if (key.length === 1 && t && t.tagName && isEditable(t)) {
-          if (this.lastInputEl === t) return
-          this.lastInputEl = t
-          this.addBreadcrumb({ category: 'input', message: `输入 → ${this.describeWithComponent(t)}` })
-        }
-      } catch (err) {
-        this.opts.onError?.(err)
-      }
-    }
-    window.addEventListener('keydown', this.onKeydown, true)
-
-    this.installNavigationBreadcrumbs()
-    this.installXhrBreadcrumbs()
-
-    // fetch:记录 method/url/status 作 breadcrumb;排除上报自身 URL,防死循环。
-    // 哨兵 __mooPatched 防重复 init() 叠加包裹(否则每层各记一条 breadcrumb)。
-    const f = window.fetch as AnyFetch | undefined
-    if (typeof f === 'function' && !f.__mooPatched) {
-      this.origFetch = window.fetch // 原始引用(close 时按引用还原)
-      const orig = this.origFetch.bind(window) // 调用时绑定 window(否则部分浏览器 Illegal invocation)
-      const self = this.intakeUrl
-      const patched = ((...args: Parameters<typeof fetch>): Promise<Response> => {
-        const input = args[0]
-        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request)?.url
-        const method = (args[1]?.method || (input as Request)?.method || 'GET').toUpperCase()
-        const skip = !url || url.indexOf(self) !== -1 || this.isIgnoredFetchUrl(url)
-        // 调用栈须在【此刻】同步留存(仅一行栈字符串,微秒级):响应回调跑在微任务里,
-        // 那时栈上只剩 SDK 自己,业务调用方早已不在 —— 在回调里采帧会把「发起于」指向 SDK。
-        const callStack = skip ? undefined : new Error().stack
-        return orig(...args).then(
-          (res) => {
-            if (!skip) this.httpCrumb(method, url, res.status, callStack)
-            return res
-          },
-          (err) => {
-            if (!skip) this.httpCrumb(method, url, 'failed', callStack)
-            throw err
-          },
-        )
-      }) as AnyFetch
-      patched.__mooPatched = true
-      this.patchedFetch = patched
-      window.fetch = patched
-    }
-  }
-
-  /**
-   * 路由轨迹:包裹 history.pushState/replaceState(SPA 路由都走这两个)+ popstate(后退/前进),
-   * 记 `from → to`(pathname+search,出站时统一脱敏)。哨兵防重复包裹;close() 按引用还原。
-   */
-  private installNavigationBreadcrumbs(): void {
-    const h = window.history as History | undefined
-    if (!h || typeof h.pushState !== 'function') return
-
-    // 路径含 hash:hash 路由(createWebHashHistory)的跳转只改 location.hash,
-    // 不带它的话 to===from,整个 hash 模式应用一条导航轨迹都记不到。
-    const cur = () => location.pathname + location.search + location.hash
-    this.lastPath = cur()
-    const record = (from: string) => {
-      const to = cur()
-      if (to !== from) {
-        this.lastPath = to
-        this.addBreadcrumb({ category: 'navigation', message: `${from} → ${to}` })
-      }
-    }
-
-    type PatchedFn = History['pushState'] & { __mooPatched?: boolean }
-    if (!(h.pushState as PatchedFn).__mooPatched) {
-      this.origPushState = h.pushState
-      this.origReplaceState = h.replaceState
-      const wrap = (orig: History['pushState']): History['pushState'] => {
-        const fn = function (this: History, ...args: Parameters<History['pushState']>) {
-          const from = cur()
-          const ret = orig.apply(this, args)
-          record(from) // record 是箭头函数,this 已绑定客户端实例
-          return ret
-        } as PatchedFn
-        fn.__mooPatched = true
-        return fn
-      }
-      this.patchedPushState = h.pushState = wrap(this.origPushState)
-      this.patchedReplaceState = h.replaceState = wrap(this.origReplaceState)
-    }
-
-    this.onPopstate = () => record(this.lastPath)
-    window.addEventListener('popstate', this.onPopstate)
-  }
-
-  /**
-   * XHR 插桩:axios 在浏览器默认走 XMLHttpRequest 而非 fetch —— 不包它的话,
-   * axios 应用(国内 Vue 项目主流)的 API 请求完全不进轨迹、HTTP 错误捕获也不生效。
-   * open 记 method/url,send 同步留存调用栈,loadend 统一落格(status 0 = 网络失败/中断)。
-   */
-  private installXhrBreadcrumbs(): void {
-    if (typeof XMLHttpRequest === 'undefined') return
-    type PatchedFn = ((...args: never[]) => unknown) & { __mooPatched?: boolean }
-    const proto = XMLHttpRequest.prototype
-    if ((proto.open as PatchedFn).__mooPatched) return // 哨兵:重复 init 不叠包
-
-    this.origXhrOpen = proto.open
-    this.origXhrSend = proto.send
-    const origXhrOpen = this.origXhrOpen
-    const origXhrSend = this.origXhrSend
-    const intake = this.intakeUrl
-    const isIgnoredFetchUrl = (url: string) => this.isIgnoredFetchUrl(url)
-    const httpCrumb = (method: string, url: string, status: number | 'failed', callStack?: string) =>
-      this.httpCrumb(method, url, status, callStack)
-    const onError = (e: unknown) => this.opts.onError?.(e)
-    type MooXhr = XMLHttpRequest & { __moo?: { method: string; url: string; stack?: string } }
-
-    const open = function (this: MooXhr, ...args: Parameters<XMLHttpRequest['open']>) {
-      try {
-        this.__moo = { method: String(args[0] || 'GET').toUpperCase(), url: String(args[1] ?? '') }
-      } catch {
-        /* 记录失败不影响请求本体 */
-      }
-      return origXhrOpen.apply(this, args)
-    } as typeof proto.open & { __mooPatched?: boolean }
-    open.__mooPatched = true
-
-    const send = function (this: MooXhr, ...args: Parameters<XMLHttpRequest['send']>) {
-      try {
-        const meta = this.__moo
-        if (meta && meta.url && meta.url.indexOf(intake) === -1 && !isIgnoredFetchUrl(meta.url)) {
-          meta.stack = new Error().stack // 同步留存:loadend 回调里业务调用方已不在栈上
-          this.addEventListener('loadend', () => {
-            try {
-              httpCrumb(meta.method, meta.url, this.status || 'failed', meta.stack)
-            } catch (e) {
-              onError(e)
-            }
-          })
-        }
-      } catch (e) {
-        onError(e)
-      }
-      return origXhrSend.apply(this, args)
-    } as typeof proto.send & { __mooPatched?: boolean }
-    send.__mooPatched = true
-
-    this.patchedXhrOpen = proto.open = open
-    this.patchedXhrSend = proto.send = send
-  }
-
-  /** 请求 URL 是否在忽略名单(第三方统计等:不进轨迹、不触发 HttpError)。 */
-  private isIgnoredFetchUrl(url: string): boolean {
-    for (const p of this.opts.ignoreFetchUrls) {
-      if (typeof p === 'string' ? url.indexOf(p) !== -1 : p.test(url)) return true
-    }
-    return false
-  }
-
-  /**
-   * HTTP 请求统一落格(fetch 与 XHR 共用):轨迹 + ≥httpErrorsMin 的 HttpError 捕获。
-   * status='failed'/0 = 网络失败/中断,只记轨迹不计 HttpError(离线噪音)。
-   */
-  private httpCrumb(method: string, url: string, status: number | 'failed', callStack?: string): void {
-    const failed = status === 'failed' || status === 0
-    this.fetchCrumb(`${method} ${url} ${failed ? 'failed' : status}`, failed || (status as number) >= 400 ? 'error' : 'info', callStack)
-    // HTTP 响应错误自动捕获(默认 ≥500):传普通对象(非 Error)→ normalize 判定为合成栈,
-    // 丢弃 SDK 内部帧。指纹按 名称+消息 聚合 —— URL 去掉 query/hash 再进消息:
-    // 否则每个 query 组合一个指纹(轮询/搜索/游标场景),客户端合并失效 + 云端配额被刷爆。
-    if (!failed && this.opts.httpErrorsMin !== null && (status as number) >= this.opts.httpErrorsMin) {
-      this.captureException(
-        { name: 'HttpError', message: `${method} ${url.split(/[?#]/)[0]} ${status}` },
-        { handled: false, severity: 'error', extra: { status, method } },
-      )
-    }
-  }
-
-  /** 元素描述 + 所属 Vue 组件名(轨迹「源码化」第一层:`button.ant-btn "登录" · LoginForm`)。 */
-  private describeWithComponent(t: Element | null): string {
-    const comp = vueComponentName(t)
-    return describeElement(t) + (comp ? ` · ${comp}` : '')
-  }
-
-  /**
-   * fetch 轨迹落格:与上一条比对,连续同一请求(同 method+url+status,典型轮询)原地折叠成
-   * 「… ×N」并刷新时间;中间插入过其他轨迹(点击/路由等)则正常另起一条,保持时序不乱。
-   * 失败请求(level=error)附带发起方调用帧(data.frame,含 debug_id)——
-   * 云端在还原栈帧的同一遍解析里把它还原成「发起于 src/api/login.ts:42」。
-   */
-  private fetchCrumb(key: string, level: Breadcrumb['level'], callStack?: string): void {
-    if (key.length > 280) key = key.slice(0, 280) + '…' // data: 巨串 URL;折叠路径直接改写 message,须在此截
-    const last = this.crumbs.last()
-    if (this.lastFetch?.key === key && last && last.category === 'fetch') {
-      this.lastFetch.n++
-      last.message = `${key} ×${this.lastFetch.n}`
-      last.timestamp = Date.now()
-      if (level === 'error') last.level = 'error'
-      return
-    }
-    this.lastFetch = { key, n: 1 }
-    const crumb: Breadcrumb = { category: 'fetch', level, message: key }
-    if (level === 'error') {
-      const frames = this.callerFrames(callStack)
-      if (frames.length) crumb.data = { frame: frames[0], frames }
-    }
-    this.addBreadcrumb(crumb)
-  }
-
-  /**
-   * 失败请求的发起方候选帧(前 3 个):解析请求【调用时】同步留存的栈
-   * (栈形如 [patched 自身, 调用方, 再上层…] → 跳过补丁取后续帧)。
-   * 带多个候选是因为几乎所有项目都有 request() 封装 —— 第一帧常年指向封装文件
-   * 同一行,云端按序还原并取第一个源路径不含 node_modules/ 的业务帧。
-   * 绝不能在响应回调里现采 —— 微任务栈上没有业务调用方。
-   */
-  private callerFrames(callStack?: string): { file?: string; line?: number; column?: number; debug_id?: string }[] {
-    try {
-      if (!callStack) return []
-      const out: { file?: string; line?: number; column?: number; debug_id?: string }[] = []
-      for (const f of parseStack(callStack).slice(1, 4)) {
-        if (!f?.file || f.file === 'native' || f.file === 'eval') continue
-        out.push({ file: scrub(f.file), line: f.line, column: f.column, debug_id: debugIdForFile(f.file) })
-      }
-      return out
-    } catch {
-      return []
-    }
-  }
-
-  private installFlushOnHide(): void {
-    const flush = () => {
-      try {
-        // 卸载时用 sendBeacon(useBeacon=true):比 fetch 更可靠地发出残余队列。
-        this.flush(true)
-      } catch (e) {
-        this.opts.onError?.(e)
-      }
-    }
-    // visibilitychange(hidden)+ pagehide 比已废弃的 unload 更可靠;beacon 在此仍能发出残余队列。
-    this.onVisibility = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flush()
-    }
-    this.onPagehide = flush
-    window.addEventListener('visibilitychange', this.onVisibility)
-    window.addEventListener('pagehide', this.onPagehide)
-  }
-
-  private checkSourcemapRelease(): void {
-    const check = this.opts.releaseCheck
-    if (!check || !this.opts.release || typeof window === 'undefined' || typeof window.fetch !== 'function') return
-    if (check.sampleRate <= 0 || Math.random() > check.sampleRate) return
-
-    const url = this.opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/check'
-    const body = JSON.stringify({ token: this.opts.token, release: this.opts.release, app: check.app })
-    const fetcher = (this.origFetch ?? window.fetch).bind(window)
-    void fetcher(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      credentials: 'omit',
-      mode: 'cors',
+  private install(): void {
+    if (this.installed) return
+    this.installed = true
+    const ctx = this.makeCtx()
+    // releaseCheck 先跑(见 releaseCheck.ts):此刻本实例必未打 fetch 补丁,同步取 window.fetch
+    // 并 bind(window) 发出自检请求 —— 不再需要跨模块拿 origFetch。各模块 install 各自 try/catch,
+    // releaseCheck 同步抛错也不连坐其余插桩。
+    this.tryInstall(() => {
+      checkSourcemapRelease(this.opts, this.opts.onError)
+      return undefined
     })
-      .then(async (res) => {
-        const data = (await res.json().catch(() => null)) as
-          | { vip?: boolean; health?: { artifact_count?: number; debug_id_coverage?: number | null; duplicate_debug_ids?: number; restorable_rate?: number | null } }
-          | null
-        if (!res.ok || !data?.health) {
-          throw new Error(`release check failed: HTTP ${res.status}`)
-        }
-        const h = data.health
-        if (data.vip && (h.artifact_count ?? 0) === 0) {
-          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} has no sourcemap artifacts`))
-        } else if ((h.duplicate_debug_ids ?? 0) > 0) {
-          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} has duplicate sourcemap debug ids`))
-        } else if (h.debug_id_coverage != null && h.debug_id_coverage < 1) {
-          this.opts.onError?.(new Error(`moo-monitor-vue: release ${this.opts.release} sourcemap debug id coverage is ${Math.round(h.debug_id_coverage * 100)}%`))
-        }
-      })
-      .catch((e) => this.opts.onError?.(e))
+    if (this.opts.autoCapture) this.tryInstall(() => installGlobalErrors(ctx))
+    if (this.opts.autoBreadcrumbs) {
+      this.tryInstall(() => installDomCrumbs(ctx))
+      this.tryInstall(() => installHistoryCrumbs(ctx))
+    }
+    // fetch/XHR 补丁独立于 autoBreadcrumbs 门:HttpError 自动捕获只能靠这两个补丁触发,
+    // 不能被「关轨迹」连带静默关掉(P0.1)。补丁内部记轨迹与捕获 HttpError 两个动作各自判断。
+    if (this.opts.autoBreadcrumbs || this.opts.httpErrorsMin !== null) this.tryInstall(() => installHttpCrumbs(ctx))
+    this.tryInstall(() => installFlushOnHide(ctx))
   }
 }
 

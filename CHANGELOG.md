@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.14
+
+行为修正 + 内部重构(**公共 API 零变化**):3 处行为修正(P0)+ `client.ts` 外科手术式拆分(P1)+
+一批小清理(P3)+ 测试按模块重组(P2)。
+
+**行为修正(P0):**
+
+1. **`httpErrors` 独立于 `autoBreadcrumbs` 生效**:此前 fetch/XHR 补丁只装在 `installBreadcrumbs` 里,
+   `autoBreadcrumbs: false` 会**静默关掉** HTTP 错误捕获(与 README 的独立开关语义矛盾)。改为按
+   `autoBreadcrumbs || httpErrorsMin!==null` 安装补丁;补丁内「记轨迹(仅 autoBreadcrumbs)」与「捕获
+   HttpError(仅 httpErrorsMin!==null)」两个动作各自判断;`callStack` / XHR `meta.stack` 加
+   `autoBreadcrumbs` 门,只开 httpErrors 时不再白采一次栈。
+2. **XHR 复用不再双计**:`send()` 的 `loadend` 监听改 `{ once: true }` —— 同一 XHR 实例合法复用
+   (open→send→loadend→open→send)时,旧监听不再连同第二次请求一起触发,消除轨迹/HttpError 双计与
+   URL 张冠李戴。
+3. **轨迹先脱敏后截断(隐私)**:`BreadcrumbBuffer.add` 与 fetch 轨迹改为**先 `scrub` 再截断** ——
+   导航轨迹带完整 `location.hash` 时,OIDC 隐式流 `#id_token=eyJ…` 不会被先截成两段而绕过出站 JWT
+   脱敏;`scrub` 键名单补 `id_token` / `jwt`。
+
+**内部重构(P1):**`client.ts` 从 **525 行拆到 190 行** —— 五路自动插桩(全局错误 / 点击键盘 /
+路由 / fetch+XHR / 卸载 flush)与 releaseCheck 各自迁到 `src/core/instrument/*` 与
+`src/core/releaseCheck.ts`,经窄接口 `InstrumentCtx` 回调总装;17 个监听/补丁私有字段清零,
+`close()` 改为遍历各模块的 `Uninstall`。`__mooPatched` 哨兵、按引用条件还原、`function(this:…)`
+补丁形态、`enabled=false` 安全网等语义原样保留。三个入口(`.` / `/vue` / `/vite`)的导出集合与
+类型签名不变,产物体积无膨胀。
+
+**小清理(P3):**normalize 死代码 `?? message` 删除;`dom` 的 `isEditable`/`isInputLike` 合并;
+`httpErrorsMin` 三元链展开为 `resolveHttpErrorsMin`(固化三处隐藏语义);queue 失败回收顺序反转补
+注释说明;Vite 插件新增「多 output 互清构建集」与「子目录产物 basename 冲突」两项告警(不改上传行为);
+README 补「多 output / 多应用构建」与「injectDebugIds 与 SRI 完整性哈希插件不可同启」两节。
+
+**测试:**`round7/8/9-fixes` / `capture-chain` / `delivery-hardening` 五个「审查轮次」文件按模块
+重组归位并删除(用例只移不改);用例 **129 → 135**(P0 三项 + P0.2/P3.3/P3.5/P3.6 各一;round7 ⑤
+私有字段断言按方案改为可观测行为断言),typecheck / lint / test 全绿。
+
 ## 0.3.13
 
 sourcemap 管线五项闭环 —— 上传即验证、发布可观测(云端配套:intake 响应 health 块 /

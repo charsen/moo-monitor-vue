@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createApp, h } from 'vue'
 import { MooMonitor } from '../src/vue/plugin'
 import { getClient } from '../src/core/client'
+import type { FrontendErrorRecord } from '../src/core/types'
 
 describe('MooMonitor (Vue plugin)', () => {
   beforeEach(() => {
@@ -79,5 +80,54 @@ describe('SSR(无 window)', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+// 源自第七轮审查回归(Vue Router 双重捕获,归入 vue 插件模块)。
+describe('④ Vue Router 错误不再双重捕获', () => {
+  afterEach(() => getClient()?.close()) // 关掉本 describe 内经 init 建立的单例,解绑其 window 监听
+
+  it('router.onError 捕获后,同一 Error 进 unhandledrejection 被跳过', () => {
+    const records: FrontendErrorRecord[] = []
+    let routerHandler: ((e: unknown) => void) | undefined
+    const app = { provide: vi.fn(), config: { globalProperties: {} as Record<string, unknown>, errorHandler: undefined } }
+    ;(MooMonitor as { install: (a: unknown, o: unknown) => void }).install(app, {
+      endpoint: 'https://c.test/api/v1', token: 'tok12345',
+      beforeSend: (e: FrontendErrorRecord) => (records.push(e), null),
+      router: { onError: (h: (e: unknown) => void) => (routerHandler = h) },
+    })
+
+    const chunkErr = new Error('Loading chunk 12 failed')
+    routerHandler!(chunkErr) // router.onError 先捕获并打标
+    const ev = new Event('unhandledrejection')
+    ;(ev as unknown as { reason: unknown }).reason = chunkErr
+    window.dispatchEvent(ev) // 同一 Error 的未捕获拒绝随后到达
+
+    expect(records).toHaveLength(1) // 此前会是 2(count 翻倍)
+    // 其他 rejection 照常捕获
+    const ev2 = new Event('unhandledrejection')
+    ;(ev2 as unknown as { reason: unknown }).reason = new Error('other')
+    window.dispatchEvent(ev2)
+    expect(records).toHaveLength(2)
+  })
+})
+
+// 源自第九轮审查回归(__mooSeen 内部标记不泄漏进数据/指纹,归入 vue 插件模块)。
+describe('③ __mooSeen 不泄漏进非 Error 抛掷物的消息', () => {
+  afterEach(() => getClient()?.close())
+
+  it('router.onError 标记后,对象序列化出的 message 不含内部标记', () => {
+    const records: FrontendErrorRecord[] = []
+    let handler: ((e: unknown) => void) | undefined
+    const app = { provide: vi.fn(), config: { globalProperties: {} as Record<string, unknown>, errorHandler: undefined } }
+    ;(MooMonitor as { install: (a: unknown, o: unknown) => void }).install(app, {
+      endpoint: 'https://c.test/api/v1', token: 'tok12345',
+      beforeSend: (e: FrontendErrorRecord) => (records.push(e), null),
+      router: { onError: (h: (e: unknown) => void) => (handler = h) },
+    })
+
+    handler!({ code: 403, reason: 'forbidden' }) // 非 Error 抛掷物
+    expect(records[0].error.message).toContain('403')
+    expect(records[0].error.message).not.toContain('__mooSeen') // 内部标记不进数据/指纹
   })
 })

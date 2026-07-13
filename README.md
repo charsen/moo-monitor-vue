@@ -91,7 +91,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `autoBreadcrumbs` | `true` | 自动记录点击 / 键盘 / 路由 / fetch 轨迹(键盘只记按键与目标,绝不记内容) |
 | `autoSession` | `true` | 自动生成会话 ID(sessionStorage,标签页生命周期);`setUser({ sessionId })` 优先 |
 | `releaseCheck` | `false` | 可选 release 自检。`true` 或 `{ sampleRate, app }` 会用前端错误 token 查询云端 sourcemap 健康摘要,建议开发/灰度开启 |
-| `httpErrors` | `true` | fetch 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭 |
+| `httpErrors` | `true` | fetch/XHR 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭。**独立于 `autoBreadcrumbs` 生效**——关轨迹不会连带关掉 HTTP 错误捕获;要完全不打 fetch/XHR 补丁,需同时设 `httpErrors: false` |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
 | `ignoreFetchUrls` | 内置统计域名 | 请求轨迹忽略名单(GA/GTM/百度统计/友盟/神策等默认忽略,传 `[]` 全保留) |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |
@@ -245,6 +245,17 @@ declare const __MOO_RELEASE__: string
 携带 ID 上报,云端**优先按 ID 匹配** —— 产物与 map 内容级强绑定,与 release / 文件名 / 部署路径
 解耦;传错构建批次会显式匹配失败而非错位还原。匹配链:`debug_id → (release, 文件名) → 文件名
 项目内唯一回退`。因此 **release 三处一致从「硬约束」降级为「建议」**(老 SDK / curl 上传仍依赖它)。
+
+**多 output / 多应用构建(@vitejs/plugin-legacy、monorepo)**:插件按【每个 rollup output】各跑一次上传,
+`build_id` 只由本 output 的 map 文件名单哈希得出。同一 `release` + `app` 下,第二个 output(典型:legacy 链)
+会以不同 `build_id` 触发云端「构建集替换」,把前一个 output(现代链)的 map 整组清掉,且 `strict` 查不出来。
+**务必为每个 output / 每个应用传入不同的 `app`** 加以区分(如 `modern` / `legacy`);插件检测到同进程内
+`build_id` 变化会 `warn` 提示。另:自定义 `entryFileNames` 时避免不同目录产出同名 `.map` —— 上传与归档都只按
+`basename` 处理,重名会导致归档互相覆盖、云端匹配二义(插件检测到重名 basename 亦会 `warn`)。
+
+**与 SRI 完整性哈希插件不可同时启用**:`injectDebugIds`(默认开)在 `writeBundle` 阶段改写产物 JS(头部注入
+注册 snippet),而 `vite-plugin-sri` 等在 `generateBundle` 阶段就已算好各 chunk 的 `integrity` 哈希 —— JS 被改写后
+哈希对不上,浏览器会**拒载全部 chunk**。二者互斥:要用 SRI 请设 `injectDebugIds: false`(退回 release + 文件名匹配)。
 
 **4)或裸 API**(非 Vite 项目,CI 里 curl):
 

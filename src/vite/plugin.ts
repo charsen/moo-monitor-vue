@@ -173,6 +173,10 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
   // build.sourcemap 的最终取值(configResolved 里拿):true 时产物 JS 带指向注释,
   // deleteAfterUpload 删 map 后须把注释一并剥掉,否则全量访客的 devtools 每 chunk 一个 404。
   let sourcemapSetting: boolean | 'inline' | 'hidden' | undefined
+  // 多 output 构建(@vitejs/plugin-legacy 等)会对同一插件实例多次调 writeBundle,各 output 的 buildId 不同。
+  // 记录首个 buildId,二次不同即告警(P3.5)——否则第二个 output 以不同 build_id 触发云端「构建集替换」,
+  // 把前一个 output 的 map 整组清掉,且 strict 查不出来(expected_files 按本 output 计)。
+  let firstBuildId: string | undefined
 
   return {
     name: 'moo-monitor-vue:sourcemap-upload',
@@ -195,6 +199,23 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       if (names.length === 0) {
         fail("未发现 .map 产物 —— 请确认 build.sourcemap 已开启(推荐 'hidden':生成 map 但产物里不留指向注释)。")
         return
+      }
+
+      // basename 冲突检测(P3.6,不改行为):上传(files[])与归档都只按 basename 处理,自定义 entryFileNames
+      // 产出不同目录同名 map 时归档互相覆盖、云端匹配二义(debug_id 能救栈匹配,救不了归档丢失)。命中即告警。
+      {
+        const byBase = new Map<string, string[]>()
+        for (const n of names) {
+          const b = basename(n)
+          const arr = byBase.get(b)
+          if (arr) arr.push(n)
+          else byBase.set(b, [n])
+        }
+        for (const [b, group] of byBase) {
+          if (group.length > 1) {
+            warn(`不同目录下存在同名 map「${b}」(${group.join(', ')})—— 上传/归档只按 basename 处理,会互相覆盖、云端匹配二义;请避免跨目录重名产物或用 include 收窄。`)
+          }
+        }
       }
 
       // Debug ID 注入(上传前):产物与 map 内容级强绑定,云端优先按 ID 匹配。
@@ -227,6 +248,16 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
       // (否则每次构建全部改名,旧 map 无限堆积、占满 release 配额);同一构建的分块/
       // 断点补传/CI 重跑同内容则相安无事。
       const buildId = createHash('sha256').update([...names].sort().join('\n')).digest('hex').slice(0, 32)
+      // 多 output 互清构建集告警(P3.5,不改行为):同进程二次 writeBundle 且 buildId 不同 → 提示按 output 区分 app。
+      if (firstBuildId === undefined) {
+        firstBuildId = buildId
+      } else if (firstBuildId !== buildId) {
+        warn(
+          '同一进程内多次 writeBundle 且 build_id 不同(典型:@vitejs/plugin-legacy 等多 output 构建)—— ' +
+            '各 output 会以不同 build_id 触发云端「构建集替换」,可能把彼此的 map 整组清掉。' +
+            '请为每个 output 传入不同的 app 参数加以区分(见 README「多 output / 多应用构建」一节)。',
+        )
+      }
       if (opts.archiveDir) {
         // 归档失败不该无条件炸构建(与上传失败同一策略:默认告警,failOnError/strict 才硬失败)。
         try {

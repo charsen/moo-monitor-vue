@@ -194,6 +194,31 @@ describe('mooSourcemapUpload', () => {
     await run(mooSourcemapUpload({ ...OPTS, token: '' }), dir, bundle)
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('多 output 构建(同插件实例二次 writeBundle,build_id 不同)告警互清构建集(P3.5)', async () => {
+    const plugin = mooSourcemapUpload({ ...OPTS, injectDebugIds: false })
+    const modern = await setupDist({ 'modern-a.js.map': '{}' })
+    const legacy = await setupDist({ 'legacy-b.js.map': '{}' }) // 不同文件名 → 不同 build_id
+
+    await run(plugin, modern.dir, modern.bundle) // 首个 output:记录 build_id,不告警
+    await run(plugin, legacy.dir, legacy.bundle) // 第二个 output:build_id 不同 → 告警
+
+    const warns = vi.mocked(console.warn).mock.calls.map((c) => String(c[0])).join('\n')
+    expect(warns).toContain('多次 writeBundle')
+    expect(warns).toContain('app')
+  })
+
+  it('不同目录同名 .map:检测 basename 冲突并告警(P3.6)', async () => {
+    const { dir, bundle } = await setupDist({
+      'modern/index.js.map': '{}',
+      'legacy/index.js.map': '{}', // 不同目录、同 basename
+    })
+    await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), dir, bundle)
+
+    const warns = vi.mocked(console.warn).mock.calls.map((c) => String(c[0])).join('\n')
+    expect(warns).toContain('index.js.map')
+    expect(warns).toMatch(/同名|覆盖|二义/)
+  })
 })
 
 describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () => {
@@ -240,6 +265,90 @@ describe('第十二轮:monorepo app / 字节分块 / 413 与生效预期', () =>
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     await run(mooSourcemapUpload({ ...OPTS, injectDebugIds: false }), dir, bundle)
     expect(logSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('生效')
+    vi.restoreAllMocks()
+  })
+})
+
+// 源自第八轮审查回归(Vite 插件失败处理)。
+describe('⑤ Vite 插件失败处理', () => {
+  async function setup(maps: Record<string, string>) {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-r8-'))
+    const bundle: Record<string, unknown> = {}
+    for (const [n, c] of Object.entries(maps)) {
+      await writeFile(join(dir, n), c)
+      bundle[n] = { type: 'asset' }
+    }
+    return { dir, bundle }
+  }
+  const OPTS = { endpoint: 'https://cloud.test/api/v1', token: 'ci', release: '1.0.0' }
+  const resp = (status: number, body: unknown) => new Response(JSON.stringify(body), { status })
+
+  it('429 等待后重试一次成功;错误信息兼容 Laravel 的 message 字段', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(429, { message: 'Too Many Attempts.' }))
+      .mockResolvedValueOnce(resp(200, { ok: true, saved: 1, skipped: 0, errors: {} }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const { dir, bundle } = await setup({ 'a.js.map': '{}' })
+    await (mooSourcemapUpload(OPTS).writeBundle as (o: unknown, b: unknown) => Promise<void>)({ dir }, bundle)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2) // 429 → 等 2s 重试一次 → 成功
+    vi.restoreAllMocks()
+  }, 8000)
+
+  it('中途失败给出半传摘要(已传 N/共 M)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(resp(200, { ok: true, saved: 20, skipped: 0, errors: {} }))
+      .mockResolvedValueOnce(resp(500, { message: 'Server Error' }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const maps: Record<string, string> = {}
+    for (let i = 0; i < 25; i++) maps[`c${i}.js.map`] = '{}' // 2 个 chunk(20+5)
+    const { dir, bundle } = await setup(maps)
+    await (mooSourcemapUpload(OPTS).writeBundle as (o: unknown, b: unknown) => Promise<void>)({ dir }, bundle)
+
+    const all = warnSpy.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(all).toContain('已传 20/25')
+    expect(all).toContain('Server Error') // message 字段被读出
+    vi.restoreAllMocks()
+  })
+})
+
+// 源自第九轮审查回归(删 map 后剥 sourceMappingURL 注释)。
+describe('② Vite 插件:删 map 后剥 sourceMappingURL 注释', () => {
+  const OPTS = { endpoint: 'https://cloud.test/api/v1', token: 'ci', release: '1.0.0', deleteAfterUpload: true }
+  const ok = () => new Response(JSON.stringify({ ok: true, saved: 1, skipped: 0, errors: {} }), { status: 200 })
+
+  async function run(sourcemapSetting: boolean | 'hidden') {
+    const dir = await mkdtemp(join(tmpdir(), 'moo-r9-'))
+    await writeFile(join(dir, 'a.js'), 'console.log(1)\n//# sourceMappingURL=a.js.map\n')
+    await writeFile(join(dir, 'a.js.map'), '{}')
+    vi.stubGlobal('fetch', vi.fn(async () => ok()))
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const plugin = mooSourcemapUpload(OPTS)
+    ;(plugin.configResolved as (c: unknown) => void)({ build: { sourcemap: sourcemapSetting } })
+    await (plugin.writeBundle as (o: unknown, b: unknown) => Promise<void>)({ dir }, { 'a.js.map': {}, 'a.js': {} })
+    return dir
+  }
+
+  it("sourcemap:true → 删 map 同时剥掉 JS 尾部注释(不再 404);'hidden' 不动 JS", async () => {
+    const dir = await run(true)
+    expect(await readdir(dir)).toEqual(['a.js'])
+    const js = await readFile(join(dir, 'a.js'), 'utf8')
+    expect(js).not.toContain('sourceMappingURL') // 注释被剥
+    expect(js).toContain('console.log(1)')
+    vi.restoreAllMocks()
+
+    const dir2 = await run('hidden')
+    const js2 = await readFile(join(dir2, 'a.js'), 'utf8')
+    expect(js2).toContain('sourceMappingURL') // hidden 下 JS 本就不该被碰(此处文件是手造的)
     vi.restoreAllMocks()
   })
 })

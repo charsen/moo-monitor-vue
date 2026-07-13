@@ -145,6 +145,19 @@ export const DEFAULT_IGNORE_FETCH_URLS: (string | RegExp)[] = [
   'hm.baidu.com', 'cnzz.com', 'umeng.com', 'sensorsdata', 'growingio.com',
 ]
 
+/**
+ * HTTP 错误捕获阈值:false=关闭(null);true/省略=默认 ≥500;对象取 .min(缺省 500)再钳到 ≥400。
+ * 三处隐藏语义务必保持:
+ * ① `== null` 是宽松等于(同时盖 null/undefined),不得写成 === undefined;
+ * ② {}(空对象)先取默认 500 再钳 → 500(而非 400),钳制顺序必须 Math.max(min ?? 500, 400);
+ * ③ 类型外输入(如 httpErrors: 0)走对象分支取 .min 得 undefined → 500,不抛错。
+ */
+function resolveHttpErrorsMin(httpErrors: MooOptions['httpErrors']): number | null {
+  if (httpErrors === false) return null
+  if (httpErrors === true || httpErrors == null) return 500
+  return Math.max(httpErrors.min ?? 500, 400)
+}
+
 export function resolveOptions(o: MooOptions): ResolvedOptions {
   return {
     endpoint: o.endpoint,
@@ -166,8 +179,8 @@ export function resolveOptions(o: MooOptions): ResolvedOptions {
       : o.releaseCheck
         ? { sampleRate: Math.min(Math.max(o.releaseCheck.sampleRate ?? 1, 0), 1), app: o.releaseCheck.app }
         : false,
-    // 阈值钳到 ≥400:min:0 之类会把所有 2xx 也捕成 HttpError,免费档配额瞬间被刷光。
-    httpErrorsMin: o.httpErrors === false ? null : o.httpErrors === true || o.httpErrors == null ? 500 : Math.max(o.httpErrors.min ?? 500, 400),
+    // 阈值钳到 ≥400:min:0 之类会把所有 2xx 也捕成 HttpError,免费档配额瞬间被刷光(见 resolveHttpErrorsMin)。
+    httpErrorsMin: resolveHttpErrorsMin(o.httpErrors),
     ignoreErrors: o.ignoreErrors ?? [],
     ignoreFetchUrls: o.ignoreFetchUrls ?? DEFAULT_IGNORE_FETCH_URLS,
     beforeSend: o.beforeSend,

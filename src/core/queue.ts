@@ -162,6 +162,8 @@ export class Queue {
       })
       if (!dispatched) {
         // 没派发出去(无通道/罕见同步失败):原样收回,不算一次重试;安排下一次,别等下个 add()。
+        // 注:多批「未派发」时逐批 unshift 会造成批【间】顺序反转 —— 影响可忽略(云端按 hash 聚合、
+        // 时间取自记录本身 first_seen/last_seen,不依赖到达序),故此处只回插不额外排序。
         this.buf.unshift(...recs)
         this.arm(this.flushInterval)
         ok = false
@@ -201,6 +203,8 @@ export class Queue {
         continue
       }
       this.retried.add(r)
+      // 正序逐条 unshift 会把批【内】顺序反转([r1,r2,r3] → [r3,r2,r1])—— 同上,影响可忽略
+      // (云端按 hash 聚合、时间取自记录本身),故保留正序回插、不额外倒序。
       this.buf.unshift(r) // 回收到队首,保持大致时序
       requeued = true
     }
