@@ -19,7 +19,7 @@ export interface SourcemapUploadOptions {
   endpoint: string
   /** 只含 sourcemaps 能力的项目 token(CI 密钥,勿入仓库 / 勿用浏览器 token) */
   token: string
-  /** 版本号 —— 必须与 SDK init 的 release 完全一致,否则匹配不上 */
+  /** 版本号。建议与 SDK init 同源生成;关闭 Debug ID 或老接入时必须完全一致。 */
   release: string
   /** 匹配要上传的产物文件,默认 /\.js\.map$/ */
   include?: RegExp

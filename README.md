@@ -6,9 +6,9 @@
 
 ## 特性
 
-- **四大捕获通道**(不漏报):`window.onerror`(带 `error.stack`)+ 未处理 Promise(`unhandledrejection`)+ **Vue `app.config.errorHandler`**(Vue 吞掉的渲染/生命周期错误不冒泡到 `onerror`,必须单独接)+ 资源加载错误(捕获阶段)。
-- **行为轨迹 breadcrumbs**:点击(解析到就近交互元素 + 可读文本)、键盘关键节点(Enter/Escape + 「开始输入」聚合,**绝不记输入内容**)、SPA 路由跳转(`from → to`)、fetch 请求 —— 自动串成「报错前用户做了什么」的操作链路;另自动捕获 **HTTP ≥500 响应**为错误、自动生成**会话 ID**(影响用户数可统计)。
-- **上下文**:`release`(版本,sourcemap 还原的匹配键)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
+- **多来源错误捕获**:`window.onerror`(带 `error.stack`)、未处理 Promise(`unhandledrejection`)、**Vue `app.config.errorHandler`**、资源加载失败、Router 动态 import 失败、fetch/XHR HTTP 错误和手动上报。
+- **行为轨迹 breadcrumbs**:点击(解析到就近交互元素 + 可读文本)、键盘关键节点(Enter/Escape + 「开始输入」聚合,**绝不记输入内容**)、SPA 路由跳转(`from → to`)及 fetch/XHR(含 axios)请求 —— 自动串成「报错前用户做了什么」的操作链路;另自动生成**会话 ID**(影响会话数可统计)。
+- **上下文**:`release`(版本及 sourcemap 回退匹配键)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
 - **sourcemap 还原(VIP)**:配套 Vite 插件构建后自动上传 `.map`,云端把压缩堆栈还原成源码位置(`.vue` 文件即出错组件),见 [sourcemap 还原](#sourcemap-还原vip)。
 - **可靠上报**:客户端按指纹**合并计数**(同错误累加 `count`、风暴不刷屏)、`sampleRate` 采样、`ignoreErrors` 噪音过滤、批量队列(按字节分批避开 64KB 上限)、页面卸载(`pagehide`/`visibilitychange`)用 `sendBeacon` 兜底发送(失败回退 `fetch keepalive`)。
 - **分层**:框架无关 `core` + 薄 Vue 适配层 —— `core` 可单独用于任意 JS 项目。
@@ -21,7 +21,14 @@ npm i moo-monitor-vue
 
 `vue` 为 peerDependency(`^3.3`),不会重复打包。
 
-> 🚧 **尚未发布到 npm**:上面的命令暂时装不到。发布前请从 gitee 源码安装(`npm i git+https://gitee.com/charsen/moo-monitor-vue.git`),详见 **[发布前安装测试指南 → docs/local-testing.md](docs/local-testing.md)**(含云端拿 token、验证闭环、排查清单)。
+### 运行环境兼容性
+
+- `moo-monitor-vue` 与 `moo-monitor-vue/vue` 是浏览器运行时入口，面向 ES2020 现代浏览器，不要求业务项目统一使用某个 Node.js 大版本。
+- `moo-monitor-vue/vite` 与 `moo-monitor-release` 在构建期运行，支持 Node.js 18、20、22、24；仓库 CI 会分别执行类型检查、代码检查、测试和构建。
+- Node.js 16 不属于当前版本的支持范围。仍使用 Node.js 16 的旧项目应先升级构建运行时，或固定在已经自行验证过的旧版 SDK；不要仅因浏览器入口可加载就假定 Vite 插件也兼容。
+- 建议每个宿主仓库用 `.nvmrc`、`.node-version` 或同类工具独立固定构建版本；某个大型项目选择 Node.js 24，不会改变本包及其他宿主的最低版本。
+
+> 🚧 **当前 0.3.14 尚未发布到 npm**:上面的命令暂时装不到。发布前请从 gitee 源码安装(`npm i git+https://gitee.com/charsen/moo-monitor-vue.git`),详见 **[发布前安装测试指南 → docs/local-testing.md](docs/local-testing.md)**(含云端拿 token、验证闭环、排查清单)。
 
 ## 快速开始(Vue 3)
 
@@ -43,6 +50,7 @@ app.use(MooMonitor, {
   ignoreErrors: ['ResizeObserver loop', /^Script error\.?$/],
   router,                                       // 可选:传入 Vue Router → 捕获懒加载 chunk 失败(发版后旧 chunk 404)
   // beforeSend: (e) => (e.error.message.includes('secret') ? null : e),
+  // onError: (e) => console.warn('[moo-monitor]', e), // SDK 自检/丢弃等诊断;默认静默
 })
 
 app.mount('#app')
@@ -50,7 +58,7 @@ app.mount('#app')
 
 装上后,Vue 组件错误、全局 JS 错误、未处理 Promise、资源加载失败都会自动上报。传入 `router` 还会捕获「Loading chunk failed / 动态 import 失败」(这类不进 errorHandler / window.onerror)。
 
-> **微前端 / HMR**:重复 `init()` 会自动关掉旧实例(解绑监听器 + 还原 `fetch`);也可手动 `import { close } from 'moo-monitor-vue'` 调 `close()` 卸载。**SSR/Nuxt**:服务端只暴露命令式 API,不接管浏览器侧捕获(服务端错误交给后端监控)。
+> **微前端 / HMR**:重复 `init()` 会自动关掉旧实例(解绑监听器 + 还原 `fetch`/XHR/history);也可手动 `import { close } from 'moo-monitor-vue'` 调 `close()` 卸载。**SSR/Nuxt**:服务端只暴露命令式 API,不接管浏览器侧捕获(服务端错误交给后端监控);模块级 client 是进程单例,不得依赖 `setUser` 在并发 SSR 请求之间做用户隔离。
 
 ## 命令式 API
 
@@ -80,7 +88,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `endpoint` | — | **必填**。云端 API 基址,如 `https://cloud.example.com/api/v1`(内部拼 `/frontend-errors/intake`) |
 | `token` | — | **必填**。项目推送 token(需含 `frontend_errors` 权限) |
 | `env` | `'production'` | 环境标识 |
-| `release` | — | 版本号(source map 还原 / 按版本聚合的关键) |
+| `release` | — | 版本号及 source map 回退匹配键;启用 Debug ID 时仍建议与构建上传同源生成 |
 | `project` | `'web'` | 来源标识(区分前后端) |
 | `sampleRate` | `1` | 错误采样率 0..1 |
 | `maxBreadcrumbs` | `30` | 行为轨迹队列上限 |
@@ -88,12 +96,12 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | `maxBatch` | `20` | 单批最多条数 |
 | `enabled` | `true` | 总开关 |
 | `autoCapture` | `true` | 自动捕获全局/Promise/资源错误 |
-| `autoBreadcrumbs` | `true` | 自动记录点击 / 键盘 / 路由 / fetch 轨迹(键盘只记按键与目标,绝不记内容) |
+| `autoBreadcrumbs` | `true` | 自动记录点击 / 键盘 / 路由 / fetch/XHR 轨迹(键盘只记关键节点与目标,绝不记内容) |
 | `autoSession` | `true` | 自动生成会话 ID(sessionStorage,标签页生命周期);`setUser({ sessionId })` 优先 |
-| `releaseCheck` | `false` | 可选 release 自检。`true` 或 `{ sampleRate, app }` 会用前端错误 token 查询云端 sourcemap 健康摘要,建议开发/灰度开启 |
+| `releaseCheck` | `false` | 可选 release 自检。`true` 或 `{ sampleRate, app }` 会用前端错误 token 查询云端 sourcemap 健康摘要;异常经 `onError` 回调,默认静默,建议开发/灰度开启 |
 | `httpErrors` | `true` | fetch/XHR 响应 ≥500 自动捕获为 `HttpError`;`{ min: 400 }` 降阈值;`false` 关闭。**独立于 `autoBreadcrumbs` 生效**——关轨迹不会连带关掉 HTTP 错误捕获;要完全不打 fetch/XHR 补丁,需同时设 `httpErrors: false` |
 | `ignoreErrors` | `[]` | 噪音过滤(字符串包含 / 正则)。建议过滤浏览器良性噪音:`['ResizeObserver loop', /^Script error\.?$/]` |
-| `ignoreFetchUrls` | 内置统计域名 | 请求轨迹忽略名单(GA/GTM/百度统计/友盟/神策等默认忽略,传 `[]` 全保留) |
+| `ignoreFetchUrls` | 内置统计域名 | fetch/XHR 忽略名单;命中后既不记请求轨迹,也不触发 `HttpError`。GA/GTM/百度统计/友盟/神策等默认忽略,传 `[]` 全保留 |
 | `beforeSend` | — | 发送前钩子,返回 `null` 丢弃 |
 | `onError` | — | SDK 自身错误 / 丢弃回执回调(默认静默,绝不抛回宿主) |
 
@@ -116,16 +124,17 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 这是个**前端异常监控**:只采集「错误」类事件 + 出错现场的环境与行为轨迹,**不**采集正常业务数据、性能指标或录屏。
 
-**捕获来源(6 类,都是错误):**
+**捕获来源(均为错误事件):**
 
 1. 未捕获的 JS 运行时错误 —— `window.onerror`(带堆栈)
 2. 未处理的 Promise 拒绝 —— `unhandledrejection`
 3. Vue 组件错误 —— `app.config.errorHandler`(渲染/生命周期/watch,这些不冒泡到 `onerror`,故单独接)
 4. 资源加载失败 —— 捕获阶段 error 事件(img/script/css 404 等,记为 `warning`)
-5. HTTP 响应错误 —— 经包裹的 fetch **与 XMLHttpRequest(axios)**,状态码 ≥500(可调 / 可关)记为 `HttpError`
-6. 手动上报 —— `captureException(e)` / `captureMessage('…')`
+5. Router 动态 import 失败 —— 传入 Vue Router 后由 `router.onError` 捕获发版后的旧 chunk 404
+6. HTTP 响应错误 —— 经包裹的 fetch **与 XMLHttpRequest(axios)**,状态码 ≥500(可调 / 可关)记为 `HttpError`
+7. 手动上报 —— `captureException(e)` / `captureMessage('…')`
 
-> 不会上报:正常接口请求、性能指标(FCP/LCP…)、用户行为本身、页面录屏 —— 均不在 v1 范围(见[路线图](#路线图))。
+> 不会上报:正常接口请求、性能指标(FCP/LCP…)、用户行为本身、页面录屏 —— 均不在 v1 范围(见[路线图与边界](#路线图与边界))。
 
 **每条错误携带的信息:**
 
@@ -136,7 +145,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 | 页面 | 出错页面 URL、referrer |
 | 浏览器 / 设备 | UA、浏览器 + 版本、系统、设备类型(Mobile/Tablet/Desktop) |
 | 上下文 | 环境 `env`、版本 `release`、来源 `project`、发生时间 |
-| 行为轨迹 `breadcrumbs` | 报错前的**点击**(交互元素 + 可读文本)、**键盘关键节点**(Enter/Escape、「开始输入」,无内容)、**路由跳转**(from → to)与 **fetch 请求**(method/url/status);环形队列约 30 条 |
+| 行为轨迹 `breadcrumbs` | 报错前的**点击**(交互元素 + 可读文本)、**键盘关键节点**(Enter/Escape、「开始输入」,无内容)、**路由跳转**(from → to)与 **fetch/XHR 请求**(method/url/status);环形队列约 30 条 |
 | 用户 | `id` / `name`(需 `setUser(...)`);`session_id` 自动生成(标签页生命周期,可关) |
 | 自定义 | `tags` / `extra`(`captureException(e, { tags, extra })` 传入) |
 | 聚合 | 指纹 `hash`、出现次数 `count`、首次 / 最近时间 |
@@ -144,7 +153,7 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 **隐私与边界:**
 
 - **键盘绝不记内容**:只记 Enter/Escape 与「开始在某输入框打字」这件事,按键值 / 输入值 / 密码一概不采;输入控件的描述只用 name/placeholder/type。
-- **breadcrumbs 里的 fetch 是「轨迹」不是「上报」**:平时不单独发,只在真出错时随错误一起带上;只记 url/method/status,**不抓请求 / 响应体**。
+- **breadcrumbs 里的 fetch/XHR 是「轨迹」不是「上报」**:平时不单独发,只在真出错时随错误一起带上;只记 url/method/status,**不抓请求 / 响应体**。
 - **不发 cookie / 凭证**(`credentials: 'omit'`);token 放请求体。
 - **脱敏**:消息 / 堆栈 / 页面 URL / 轨迹里像密钥的内容(`token=…`、JWT、`Bearer …`)**在 SDK 出站前就打码**(密钥不离开浏览器);云端写入与读取时再各兜底一层。
 - **聚合而非逐条风暴**:同一错误按指纹合并、累加 `count`、批量发送。
@@ -227,6 +236,7 @@ app.use(MooMonitor, {
   token: import.meta.env.VITE_MOO_TOKEN,
   release: __MOO_RELEASE__,
   releaseCheck: import.meta.env.DEV || import.meta.env.MODE === 'staging',
+  onError: (err) => console.warn('[moo-monitor]', err), // releaseCheck 等诊断由此返回;默认静默
 })
 ```
 
@@ -239,7 +249,8 @@ declare const __MOO_RELEASE__: string
 插件选项:`include`(默认 `/\.js\.map$/`)、`sourceMode`(`context` 保留源码上下文,`position` 只还原位置)、
 `strict`(CI 强约束:文件齐、Debug ID 覆盖、重复 ID 检查)、`archiveDir`(可选,按 `release/app` 目录归档 map)、
 `deleteAfterUpload`(默认 `false`,生产建议 `true`)、
-`failOnError`(默认 `false`:上传失败只告警不挡构建)、`injectDebugIds`(默认 `true`,见下)、`silent`。
+`failOnError`(默认 `false`:未启用 `strict` 时上传失败只告警不挡构建)、`injectDebugIds`(默认 `true`,见下)、`silent`。
+启用 `strict` 后,配置缺失、上传中断、云端无 health 或健康检查不达标都会直接让构建失败,不受 `failOnError: false` 影响。
 
 **Debug ID(v0.3.7+,默认开启)**:插件给每个 bundle 注入唯一 ID(写进产物与 map),错误帧
 携带 ID 上报,云端**优先按 ID 匹配** —— 产物与 map 内容级强绑定,与 release / 文件名 / 部署路径
@@ -279,12 +290,11 @@ npm run typecheck  # tsc --noEmit
 npm run build      # vite library 构建 → dist/(esm + cjs + d.ts)
 ```
 
-## 路线图
+## 路线图与边界
 
 - [x] sourcemap 上传 + 云端还原(v0.3.0:Vite 插件 + 云端流式解析,VIP)
-- [ ] localStorage 持久离线队列 + 在线重放
-- [ ] 性能 / Web Vitals(与异常监控正交)
 - [ ] 按域名白名单的公共上报公钥
+- 不计划纳入:性能 / Web Vitals、页面录屏、正常请求采集与 localStorage 持久离线队列;这些能力的性能、隐私或可靠性模型与当前异常监控边界不同。
 
 ## License
 

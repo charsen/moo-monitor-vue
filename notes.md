@@ -10,3 +10,4 @@
 - Vue errorHandler、Router onError 与全局错误监听可能收到同一个 Error；沿用错误对象上的去重标记，内部标记不得进入 payload 或指纹。
 - Debug ID 注入在 `writeBundle` 后改写 JS，与较早阶段计算的 SRI integrity 不兼容；启用 SRI 时关闭 `injectDebugIds`。
 - 同一 release 的多个 Rollup output 若共用 `app`，后上传的 build set 会替换先上传的 maps；modern/legacy 或多应用输出必须使用不同 `app`。
+- 在 `transform`、`renderChunk` 或上传阶段清空特定模块/chunk 的 map，虽能显著缩小 map 文件，却不能稳定降低 Rollup sourcemap 构建峰值；Node 22 大型 host 交换顺序 A/B 出现反向波动。要降低峰值必须从模块图中拆分或移除大型预打包依赖，不能把 `include`、`sourceMode: 'position'` 或空映射策略宣传为堆内存优化。

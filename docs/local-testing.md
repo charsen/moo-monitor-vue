@@ -46,10 +46,10 @@ npm i git+https://gitee.com/charsen/moo-monitor-vue.git
 # 1) 在 SDK 仓库里打包(会自动 build,产出 .tgz)
 git clone https://gitee.com/charsen/moo-monitor-vue.git
 cd moo-monitor-vue && npm install && npm pack
-# → 生成 moo-monitor-vue-0.3.13.tgz
+# → 当前 0.3.14 生成 moo-monitor-vue-0.3.14.tgz
 
 # 2) 在你的项目里安装这个 tarball
-npm i /绝对路径/moo-monitor-vue/moo-monitor-vue-0.3.13.tgz
+npm i /绝对路径/moo-monitor-vue/moo-monitor-vue-0.3.14.tgz
 ```
 
 装进去的就是 `files` 白名单内容(`dist` + README + LICENSE),和将来发布到 npm 的产物一致。
@@ -124,8 +124,10 @@ VITE_MOO_TOKEN=粘贴你的项目 token
 2. 在页面上**故意抛个错**:
    ```ts
    throw new Error('hello moo monitor')
-   // 或点一个会报错的按钮 / 调一个会 404 的接口
+   // 或点一个会报错的按钮 / 调一个会返回 500 的接口
    ```
+   默认 `httpErrors` 只把 **≥500** 响应捕获为错误;如果要用 404 验证,需配置
+   `httpErrors: { min: 400 }`。
 3. 几秒后(SDK 默认每 5s 批量上报,或刷新 / 切到后台会立刻发),到云端
    **项目 → 数据 → 「前端错误」** 列表查看,应能看到这条 `Error: hello moo monitor`,
    点开有调用栈、浏览器、breadcrumbs 等。
@@ -141,8 +143,12 @@ VITE_MOO_TOKEN=粘贴你的项目 token
 - **endpoint 写错**:应以 `/api/v1` 结尾,SDK 内部自动拼 `/frontend-errors/intake`。
 - **跨域 / 混合内容**:HTTPS 页面调 HTTP 云端会被浏览器拦;本地 `http://` 页面调 `http://127.0.0.1:8000` 没问题。
 - **被噪音过滤**:检查有没有设 `ignoreErrors` 把你的测试错误匹配掉了。
-- **F12 看网络**:应有一条 `POST .../frontend-errors/intake`(或 sendBeacon),返回 `{ ok: true, saved: 1 }`。
-  - 返回 401/403 → token 问题;429 → 触发限流(测试期把云端 `INTAKE_RATE_LIMIT_PER_MIN` 调大)。
+- **F12 看网络**:应有一条 `POST .../frontend-errors/intake`(或 sendBeacon)。同时核对 **HTTP 状态**和
+  **Response 响应体**:成功时应为 2xx 且类似 `{ ok: true, saved: 1 }`;不要只看到请求就当作上报成功。
+  - 没有请求 → 确认错误没被 `ignoreErrors` / `sampleRate` 过滤,并等待 `flushInterval` 或手动切换标签页。
+  - 401/403 → 读响应体的 `error` / `message`,核对 token 是否存在、能力是否为 `frontend_errors`。
+  - 404 → 核对 `endpoint` 是云端 `/api/v1` 基址,而不是业务站域名或已拼好的 intake 路径。
+  - 429 → 读取 `Retry-After` 并确认是否触发共享 token 限流;测试期再按需调整云端配置。
 
 ---
 

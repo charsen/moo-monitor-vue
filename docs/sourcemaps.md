@@ -41,9 +41,10 @@ CI 构建(vite build, sourcemap: 'hidden')
    - ⚠️ `endpoint` 只填基址(如 `https://cloud.example.com/api/v1`),**与 SDK init 的 endpoint 同值原样照抄**,
      不要自己拼 `/sourcemaps/intake`(少 `/api/v1` 或填成业务站域名都会 404);
    - 大型多入口项目 map 很多时,可用 `include` 只传业务入口:`include: /assets\/(index|admin)-.*\.js\.map$/`。
+     该选项只减少上传文件数;Rollup 仍会先为全部 chunk 生成 map,因此不能用它估算或承诺构建峰值下降。
    - 生产 CI 建议开启 `strict: true`,云端 health 不达标时直接挡构建。
    - 不希望源码上下文上云时设 `sourceMode: 'position'`,仍可还原文件/行/列,但详情和 AI 修复不会展示源码片段。
-4. **release 两处同源**:
+4. **release 统一生成**(推荐;未注入 Debug ID 或老接入时是硬约束):
    - Vite `define: { __MOO_RELEASE__: JSON.stringify(release) }`;
    - SDK `init({ release: __MOO_RELEASE__ })`;
    - 插件 `mooSourcemapUpload({ release })`。
@@ -76,7 +77,6 @@ export default defineConfig({
       strict: true,
       archiveDir: '.moo-sourcemaps',
       deleteAfterUpload: true,
-      failOnError: true,
     }),
   ],
 })
@@ -90,6 +90,7 @@ app.use(MooMonitor, {
   token: import.meta.env.VITE_MOO_TOKEN,
   release: __MOO_RELEASE__,
   releaseCheck: import.meta.env.DEV || import.meta.env.MODE === 'staging',
+  onError: (err) => console.warn('[moo-monitor]', err), // releaseCheck 通过 onError 返回异常;默认静默
 })
 ```
 
@@ -132,7 +133,10 @@ const release = process.env.MOO_RELEASE || await resolveMooRelease({ tagPrefix: 
 - 没有重复 Debug ID;
 - 云端回执数量与本地待上传文件数一致。
 
-SDK 侧可开启 `releaseCheck` 做运行时自检。它用浏览器里的 `frontend_errors` token 调只读接口 `/sourcemaps/check`,只返回聚合摘要,不暴露 map 文件或源码。建议开发/灰度开启,生产高流量站点可用采样:
+`strict` 是独立的 CI 硬约束:配置缺失、上传中断、云端未返回 health 或上述检查不达标时,
+都会抛错阻断构建,不受 `failOnError: false` 影响。`failOnError` 只决定【未开启 `strict`】时普通上传/归档失败是否阻断构建。
+
+SDK 侧可开启 `releaseCheck` 做运行时自检。它用浏览器里的 `frontend_errors` token 调只读接口 `/sourcemaps/check`,只返回聚合摘要,不暴露 map 文件或源码。自检异常通过 `onError` 返回,SDK 默认静默;要在开发环境看到诊断,需同时配置 `onError`。生产高流量站点可用采样:
 
 ```ts
 app.use(MooMonitor, {
@@ -140,6 +144,7 @@ app.use(MooMonitor, {
   token: import.meta.env.VITE_MOO_TOKEN,
   release: __MOO_RELEASE__,
   releaseCheck: { sampleRate: 0.01 },
+  onError: (err) => console.warn('[moo-monitor]', err),
 })
 ```
 
@@ -149,7 +154,7 @@ app.use(MooMonitor, {
 | --- | --- |
 | 资格 | 项目拥有者 VIP(非 VIP 上传返回 403 `vip_required`) |
 | 保留 | 云端默认保留最近 **15 天 / 5 个 release**(按 release 版本整组清理,旧的连文件一起清);可在云端配置调整 |
-| 大小 | 单文件 ≤ 20MB,单 release 合计 ≤ 50MB,单请求 ≤ 50 个文件 |
+| 大小 | 云端:单文件 ≤ 20MB,单 release 合计 ≤ 50MB,单请求 ≤ 50 个文件;当前 Vite 插件会更保守地按 **≤20 文件且 ≤6MB** 自动分块 |
 | 格式 | Source Map v3(Vite/esbuild/webpack 默认产物);不支持 index map(带 `sections`) |
 | 服务器 | 上传走 multipart,需云端 PHP `upload_max_filesize`/`post_max_size` ≥ 20M |
 

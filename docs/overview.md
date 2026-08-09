@@ -1,6 +1,6 @@
 # moo-monitor-vue 项目说明(研发立项)
 
-> 版本基线:v0.3.12 · 2026-06 · 仓库:https://gitee.com/charsen/moo-monitor-vue
+> 当前代码基线:v0.3.14 · 仓库:https://gitee.com/charsen/moo-monitor-vue
 
 ## 一句话介绍
 
@@ -10,13 +10,13 @@
 
 - **问题**:线上前端报错长期处于黑盒状态 —— 用户说「点了没反应」,研发只能凭猜复现;接入商业方案(Sentry 等)存在数据出境/出企、按量计费、与内部告警体系割裂三个问题。
 - **方案**:自研 SDK + 自有云端闭环。错误数据落在自己的服务器,与内部已有的运行时/慢 SQL 监控、钉钉/企微告警共用一套项目、token、通知管道。
-- **量化特征**:零运行时依赖;浏览器包 gzip 约 12KB;接入成本一行 `app.use(MooMonitor, {...})`;126 个自动化测试,经十余轮对抗式代码审查。
+- **量化特征**:零运行时依赖;接入成本一行 `app.use(MooMonitor, {...})`;当前测试目录包含 135 个测试用例,经十余轮对抗式代码审查。
 
 ## 总体架构
 
 ```
 宿主 Vue 应用(浏览器)
- ├─ 捕获层:onerror / unhandledrejection / Vue errorHandler / Router / fetch ≥500 / 手动
+ ├─ 捕获层:onerror / unhandledrejection / Vue errorHandler / Router / 资源错误 / fetch+XHR HTTP 错误 / 手动
  ├─ 轨迹层:点击(带 Vue 组件名)· 键盘 · 路由 · 请求(fetch + XHR/axios;环形 30 条,出错时随错误带出)
  ├─ 归一层:任意抛掷物 → 标准记录(栈解析 / 脱敏 / 稳定指纹)
  ├─ 队列层:同指纹合并计数 → 字节分批 → 截断分级
@@ -42,11 +42,15 @@ moo-scaffold-cloud(自有云端)
 | `moo-monitor-vue/vue` | 浏览器 | Vue 3 适配薄层(插件、errorHandler 接管、依赖注入) |
 | `moo-monitor-vue/vite` | Node(构建期) | sourcemap 上传 + Debug ID 注入 + CI 健康检查插件,不进浏览器包 |
 
-### core 内核(src/core,~1300 行)
+### core 内核(src/core)
 
 | 模块 | 职责 |
 |---|---|
-| `client.ts` | 总装:生命周期(init/close)、自动捕获安装、行为轨迹手柄(fetch + XHR 插桩)、HTTP 错误捕获、会话注入 |
+| `client.ts` | 总装与命令式 API:生命周期(init/close)、capture 管道、上下文与队列协调;自动插桩由 `instrument/*` 提供 |
+| `instrument/globalErrors.ts` | 全局 JS、未处理 Promise 与资源加载错误捕获 |
+| `instrument/domCrumbs.ts` / `historyCrumbs.ts` | 点击、键盘和 SPA 导航轨迹;维护对应安装/卸载生命周期 |
+| `instrument/httpCrumbs.ts` | fetch + XHR 插桩、请求轨迹、HTTP 错误捕获和失败请求发起帧 |
+| `instrument/flushOnHide.ts` | 页面隐藏或卸载时触发 beacon flush |
 | `normalize.ts` | 任意抛掷物 → 标准上报记录;栈解析调度;稳定指纹(剥离构建 hash) |
 | `stacktrace.ts` | Chrome/Firefox/Safari/eval/native/无列号 六类栈格式解析 |
 | `queue.ts` | 内存批量队列:同指纹合并、UTF-8 真字节分批(≤56KB)、分级截断、失败回收 |
@@ -56,6 +60,7 @@ moo-scaffold-cloud(自有云端)
 | `dom.ts` | 操作元素解析:就近交互祖先 + 可读描述 + Vue 业务组件名反查(跳过 UI 库组件),输入控件绝不取值 |
 | `session.ts` | 会话 ID 自动化(sessionStorage,标签页生命周期) |
 | `debugIds.ts` | Debug ID 注册表读取,栈帧携带 ID 上报 |
+| `releaseCheck.ts` | 按采样调用云端 sourcemap 健康检查,异常通过 `onError` 返回(默认静默) |
 | `scope.ts` | 用户/tags/extra 上下文(均有钳制) |
 | `sampling.ts` / `hash.ts` / `uaParse.ts` | 采样与噪音过滤 / FNV-1a 指纹 / UA 解析(含微信、钉钉、QQ、UC、iOS 三方浏览器) |
 
@@ -69,7 +74,7 @@ moo-scaffold-cloud(自有云端)
 
 ## 功能点清单
 
-### 1. 错误采集(六个通道,不漏报)
+### 1. 错误采集来源
 
 | 功能点 | 介绍 |
 |---|---|
@@ -78,7 +83,8 @@ moo-scaffold-cloud(自有云端)
 | Vue 组件错误 | 渲染/生命周期/watcher 错误被 Vue 吞掉、不冒泡到 onerror,单独接管并附**出错组件名** |
 | 路由 chunk 失败 | 发版后旧页面懒加载 404(最常见的"白屏"原因),经 `router.onError` 捕获,且与 Promise 通道防双计 |
 | HTTP 响应错误 | 经包裹的 **fetch 与 XMLHttpRequest(axios)**,状态码 ≥500 自动生成错误(阈值可调/可关);URL 去 query 进指纹,轮询不会刷爆配额 |
-| 资源加载失败 / 手动上报 | img/script/css 404 记为告警级;`captureException/captureMessage` 供业务主动上报 |
+| 资源加载失败 | img/script/css 404 等加载错误记为告警级 |
+| 手动上报 | `captureException/captureMessage` 供业务主动上报 |
 
 ### 2. 操作链路(回答「用户做了什么才报错」)
 
@@ -143,10 +149,9 @@ moo-scaffold-cloud(自有云端)
 | 功能点 | 介绍 |
 |---|---|
 | 零运行时依赖 | 无任何第三方 npm 依赖进入浏览器;Vue 为可选 peer,核心可用于任意 JS 项目 |
-| 体积 | 浏览器包 gzip ≈ 12KB(Sentry browser SDK 约 25KB+) |
 | 微前端/HMR 友好 | `close()` 完整还原所有补丁与监听器;重复 init 自动收尾,不泄漏不重复上报 |
-| SSR 安全 | 服务端渲染下命令式 API 可用且全部安全 no-op |
-| 质量门禁 | TypeScript strict、ESLint、126 个自动化测试、发布前自动校验;v0.2~v0.3 共经十余轮对抗式审查(并发、内存、隐私、协议多视角) |
+| SSR 安全 | 服务端渲染下命令式 API 可用且安全 no-op;client 为进程级单例,不承诺并发请求级用户隔离 |
+| 质量门禁 | TypeScript strict、ESLint、当前 135 个自动化测试、发布前自动校验;v0.2~v0.3 共经十余轮对抗式审查(并发、内存、隐私、协议多视角) |
 
 ## 边界(刻意不做)
 
@@ -155,4 +160,4 @@ moo-scaffold-cloud(自有云端)
 ## 配套依赖
 
 - **moo-scaffold-cloud**(自有云端,同团队维护):错误工作台、聚合入库、sourcemap 还原、入站过滤、AI 辅助降噪、钉钉/企微/邮件告警。SDK 不可独立产生价值,立项范围默认含云端前端错误管道的持续维护。
-- 浏览器要求:现代浏览器(ES2020);构建插件要求 Node ≥18、Vite。
+- 浏览器要求:现代浏览器(ES2020);构建插件要求 Node ≥18、Vite。Node 18/20/22/24 均纳入 CI 兼容矩阵;宿主可按仓库独立固定 Node 版本,无需随其他使用方统一升级。Node 16 不在当前构建插件支持范围内。
