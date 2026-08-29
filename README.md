@@ -28,7 +28,7 @@ npm i moo-monitor-vue
 - Node.js 16 不属于当前版本的支持范围。仍使用 Node.js 16 的旧项目应先升级构建运行时，或固定在已经自行验证过的旧版 SDK；不要仅因浏览器入口可加载就假定 Vite 插件也兼容。
 - 建议每个宿主仓库用 `.nvmrc`、`.node-version` 或同类工具独立固定构建版本；某个大型项目选择 Node.js 24，不会改变本包及其他宿主的最低版本。
 
-> 🚧 **当前 0.3.14 尚未发布到 npm**:上面的命令暂时装不到。发布前请从 gitee 源码安装(`npm i git+https://gitee.com/charsen/moo-monitor-vue.git`),详见 **[发布前安装测试指南 → docs/local-testing.md](docs/local-testing.md)**(含云端拿 token、验证闭环、排查清单)。
+> 🚧 **当前 0.3.15 尚未发布到 npm**:上面的命令暂时装不到。发布前请从 gitee 源码安装(`npm i git+https://gitee.com/charsen/moo-monitor-vue.git`),详见 **[发布前安装测试指南 → docs/local-testing.md](docs/local-testing.md)**(含云端拿 token、验证闭环、排查清单)。
 
 ## 快速开始(Vue 3)
 
