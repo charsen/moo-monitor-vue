@@ -1,3 +1,8 @@
+---
+title: 前端监控研发立项说明
+group: 前端监控
+order: 10
+---
 # moo-monitor-vue 项目说明(研发立项)
 
 > 当前代码基线:v0.3.14 · 仓库:https://gitee.com/charsen/moo-monitor-vue
