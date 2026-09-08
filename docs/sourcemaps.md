@@ -1,3 +1,8 @@
+---
+title: Sourcemap 还原接入与排查
+group: 前端监控
+order: 20
+---
 # sourcemap 还原 —— 接入与排查
 
 > 适用:moo-monitor-vue ≥ 0.3.0 + moo-scaffold-cloud(含 `/api/v1/sourcemaps/intake`)。**VIP 专享**(按项目拥有者会员判定)。

@@ -1,3 +1,8 @@
+---
+title: 前端监控本地安装与测试
+group: 前端监控
+order: 30
+---
 # 发布到 npm 之前,如何安装 moo-monitor-vue 测试
 
 > `moo-monitor-vue` 暂未发布到 npm(`npm i moo-monitor-vue` 现在装不到)。

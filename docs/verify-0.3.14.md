@@ -1,3 +1,8 @@
+---
+title: 前端监控 0.3.14 验收要点
+group: 前端监控
+order: 50
+---
 # moo-monitor-vue v0.3.14 前端验收测试要点
 
 > 版本化验收文档:本文固定记录 0.3.13 → 0.3.14 的升级验收范围;日常接入以 `README.md` 与 `docs/sourcemaps.md` 为准。
