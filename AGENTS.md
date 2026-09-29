@@ -50,3 +50,5 @@
 - 插桩改动覆盖 install、触发、close 后不再触发；隐私改动加入长 JWT、截断边界、URL/hash 和 XHR/fetch 双通道测试。
 - Vite 插件改动用真实临时构建验证 Debug ID、map、archive/delete、strict 和多 output 语义；单元 mock 不能替代完整产物检查。
 - 不主动 commit、push、bump、tag 或 npm publish。提交前展示完整 diff 和真实验证结果并取得用户明确确认。
+
+- **本仓是公开仓**（GitHub 匿名可见）：文档、提交信息、注释与产物里**不得出现未开源扩展包名与内部项目名**，统一写 `moo-<name>`、"某个内部 Host" 等中性表述；含内部信息的清单/方案放私有 plan 库。
