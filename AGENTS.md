@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 规则来源：通用协作、授权、Git 与测试规则见 `~/.agents/AGENTS.md`（每轮自动加载）；Moo/Laravel 领域规则见 `~/.agents/moo.md`（涉及 scaffold/Schema/migration/Composer 时先读）。本文件只写本仓特有约束，不复制全局规则；冲突时以本文件为准。
+> 规则来源：通用协作、授权、Git 与测试规则见 `~/.agents/AGENTS.md`（每轮自动加载）。本文件只写本仓特有约束，不复制全局规则；冲突时以本文件为准。
 
 本文件适用于整个 `moo-monitor-vue` 仓库。规则冲突时依次服从系统/用户指令、当前代理规则、用户批准的方案、`NOTES.md`、`docs/` 与历史调优计划。README 和计划中的版本快照必须用当前 package、源码、测试和构建产物核实。
 
