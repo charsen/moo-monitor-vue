@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> 规则来源：通用协作、授权、Git 与测试规则见 `~/.agents/AGENTS.md`（每轮自动加载）；Moo/Laravel 领域规则见 `~/.agents/moo.md`（涉及 scaffold/Schema/migration/Composer 时先读）。本文件只写本仓特有约束，不复制全局规则；冲突时以本文件为准。
+
 本文件适用于整个 `moo-monitor-vue` 仓库。规则冲突时依次服从系统/用户指令、当前代理规则、用户批准的方案、`NOTES.md`、`docs/` 与历史调优计划。README 和计划中的版本快照必须用当前 package、源码、测试和构建产物核实。
 
 ## 开工顺序与长期记忆
@@ -49,6 +51,5 @@
 - 重构公共入口时对比构建前后顶层导出与 `.d.ts`，检查 core/vue/vite 三入口；对体积敏感改动核对 dist 大小而非凭感觉。
 - 插桩改动覆盖 install、触发、close 后不再触发；隐私改动加入长 JWT、截断边界、URL/hash 和 XHR/fetch 双通道测试。
 - Vite 插件改动用真实临时构建验证 Debug ID、map、archive/delete、strict 和多 output 语义；单元 mock 不能替代完整产物检查。
-- 不主动 commit、push、bump、tag 或 npm publish。提交前展示完整 diff 和真实验证结果并取得用户明确确认。
 
 - **本仓是公开仓**（GitHub 匿名可见）：文档、提交信息、注释与产物里**不得出现未开源扩展包名与内部项目名**，统一写 `moo-<name>`、"某个内部 Host" 等中性表述；含内部信息的清单/方案放私有 plan 库。
