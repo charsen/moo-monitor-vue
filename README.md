@@ -2,7 +2,7 @@
 
 轻量 **Vue 3 前端异常监控 SDK** —— 捕获浏览器 JS 错误并上报到 [Moo Scaffold Cloud](https://gitee.com/charsen/moo-scaffold-cloud) 的前端错误管道,在云端按指纹聚合、三诊(待处理 / 处理中 / 已解决)。
 
-> 对标 Sentry 的浏览器 SDK,但精简自建:只做**异常捕获 + 行为轨迹 + 上下文 + 可靠上报**,零运行时依赖(gzip ≈ 12KB)。
+> 对标 Sentry 的浏览器 SDK,但精简自建:只做**异常捕获 + 行为轨迹 + 上下文 + 可靠上报**,零运行时依赖(gzip ≈ 13KB)。
 
 ## 特性
 
@@ -10,7 +10,7 @@
 - **行为轨迹 breadcrumbs**:点击(解析到就近交互元素 + 可读文本)、键盘关键节点(Enter/Escape + 「开始输入」聚合,**绝不记输入内容**)、SPA 路由跳转(`from → to`)及 fetch/XHR(含 axios)请求 —— 自动串成「报错前用户做了什么」的操作链路;另自动生成**会话 ID**(影响会话数可统计)。
 - **上下文**:`release`(版本及 sourcemap 回退匹配键)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
 - **sourcemap 还原(VIP)**:配套 Vite 插件构建后自动上传 `.map`,云端把压缩堆栈还原成源码位置(`.vue` 文件即出错组件),见 [sourcemap 还原](#sourcemap-还原vip)。
-- **可靠上报**:客户端按指纹**合并计数**(同错误累加 `count`、风暴不刷屏)、`sampleRate` 采样、`ignoreErrors` 噪音过滤、批量队列(按字节分批避开 64KB 上限)、页面卸载(`pagehide`/`visibilitychange`)用 `sendBeacon` 兜底发送(失败回退 `fetch keepalive`)。
+- **可靠上报**:客户端按指纹**合并计数**、`sampleRate` 采样、`ignoreErrors` 过滤、UTF-8 字节分批；待发记录最多 200 条，在途上报最多 4 批，支持 `AbortController` 时 15 秒取消等待。页面卸载(`pagehide`/`visibilitychange`)用禁止重定向的 `fetch keepalive` 尽力发送。
 - **分层**:框架无关 `core` + 薄 Vue 适配层 —— `core` 可单独用于任意 JS 项目。
 
 ## 安装
@@ -115,6 +115,8 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 ## 规模化与限流
 
+- **慢网络保护**:同一 SDK 模块最多同时派发 4 批；满额批次保留在现有队列，不消耗重试次数，后续按 `flushInterval` 再尝试，队列超出 200 条仍丢最旧并经 `onError` 报告。支持 `AbortController` 时，15 秒后取消未返回响应头的请求，按网络失败最多重试一次。缺少取消能力或自定义 fetch 忽略取消时，在途预算保留到请求实际结束，持续限制积压。后台计时器可能延迟，15 秒不是页面冻结时的硬保证。
+- **卸载边界**:页面关闭仍使用 `fetch keepalive`，保留原来的退避豁免，但遵守在途上限及浏览器共享配额；`flush()` 返回值只表示是否派发，不代表云端已保存。未完成或尚在内存中的记录可能随页面退出而丢失。
 - **批量降频**:SDK 按 `flushInterval`(默认 5s)+ `maxBatch` 合并上报,单个用户每分钟请求数很低;但**同一前端 token 被所有访客共享**,高流量站点的聚合请求可能撞到云端 **per-token 限流**(默认 `INTAKE_RATE_LIMIT_PER_MIN=120/min`),超出会 429:SDK 进入退避(按 Retry-After),被拒的批回收重试一次,仍失败才丢弃(经 `onError` 可感知)。应对:为前端单独签发 token、按量调高云端 `INTAKE_RATE_LIMIT_PER_MIN`,并用 `sampleRate` 在客户端降采样。
 - **per-IP 限流**:云端还有 per-IP 限流(默认 `max(perMin×5, 600)/min`);办公网 / NAT 下大量用户共享出口 IP 时需留意。
 - **配额**:免费档每项目只保留**最新 30 条**前端错误(VIP 不限);高基数错误(大量不同指纹)会快速 churn —— 善用 `ignoreErrors` + `sampleRate` + 云端「忽略/静音」收敛。

@@ -146,6 +146,7 @@ export class Queue {
     if (!this.buf.length) return true
 
     const pending = this.buf.splice(0)
+    const unsent: FrontendErrorRecord[] = []
     let ok = true
     let batch: FrontendErrorRecord[] = []
     let size = 0
@@ -162,11 +163,9 @@ export class Queue {
         onFail: (records, reason) => this.recover(records as FrontendErrorRecord[], reason),
       })
       if (!dispatched) {
-        // 没派发出去(无通道/罕见同步失败):原样收回,不算一次重试;安排下一次,别等下个 add()。
-        // 注:多批「未派发」时逐批 unshift 会造成批【间】顺序反转 —— 影响可忽略(云端按 hash 聚合、
-        // 时间取自记录本身 first_seen/last_seen,不依赖到达序),故此处只回插不额外排序。
-        this.buf.unshift(...recs)
-        this.arm(this.flushInterval)
+        // 满额/无通道/同步失败均未发送，不消耗重试机会；整轮结束统一回插，
+        // 否则逐批 unshift 会反转积压顺序，后拆出的批次反而排到前面。
+        unsent.push(...recs)
         ok = false
       }
     }
@@ -186,6 +185,10 @@ export class Queue {
       size += b
     }
     sendBatch()
+    if (unsent.length) {
+      this.buf.unshift(...unsent)
+      this.arm(this.flushInterval)
+    }
     return ok
   }
 
