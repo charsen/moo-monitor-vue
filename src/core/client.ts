@@ -27,6 +27,7 @@ export class MooClient {
   private crumbs: BreadcrumbBuffer
   private scope = new Scope()
   private installed = false
+  private reportingError = false
   // 各插桩模块的卸载函数 —— close() 逐个调用还原(补丁按引用条件还原、哨兵检查等语义内聚在各模块闭包里)。
   private uninstallers: Uninstall[] = []
 
@@ -34,7 +35,7 @@ export class MooClient {
     this.opts = resolveOptions(options)
     this.intakeUrl = this.opts.endpoint.replace(/\/+$/, '') + '/frontend-errors/intake'
     this.queue = new Queue(this.intakeUrl, this.opts.token, this.opts.flushInterval, this.opts.maxBatch, (n) =>
-      this.opts.onError?.(new Error(`moo-monitor-vue: dropped ${n} records (buffer full / backoff)`)),
+      this.reportError(new Error(`moo-monitor-vue: dropped ${n} records (buffer full / backoff)`)),
     )
     this.crumbs = new BreadcrumbBuffer(this.opts.maxBreadcrumbs)
     if (this.opts.enabled && typeof window !== 'undefined') this.install()
@@ -71,7 +72,7 @@ export class MooClient {
       if (!out) return
       this.queue.add(out)
     } catch (e) {
-      this.opts.onError?.(e)
+      this.reportError(e)
     }
   }
 
@@ -98,26 +99,35 @@ export class MooClient {
   }
 
   flush(useBeacon = false): boolean {
-    return this.queue.flush(useBeacon)
+    try { return this.queue.flush(useBeacon) }
+    catch (error) { this.reportError(error); return false }
   }
 
   /** 解绑全部监听器 + 还原 fetch + flush 残余队列 —— 重复 init / 微前端卸载时调用,防泄漏与重复上报。 */
   close(): boolean {
+    this.opts.enabled = false
     const ok = this.flush(true)
+    this.queue.close()
     // 各插桩模块逐个还原(单个失败不阻断其余);补丁按引用条件还原的逻辑内聚在各模块 uninstall 里。
     for (const u of this.uninstallers.splice(0)) {
       try {
         u()
       } catch (e) {
-        this.opts.onError?.(e)
+        this.reportError(e)
       }
     }
     this.installed = false
-    this.opts.enabled = false // 关闭后不再捕获;也是「补丁无法还原时靠 captureException 门禁兜底」的安全网
     return ok
   }
 
   // ---- 自动接管 ----
+
+  private reportError(error: unknown): void {
+    if (this.reportingError) return
+    this.reportingError = true
+    try { this.opts.onError?.(error) } catch { /* 诊断回调也属于宿主代码，失败必须隔离。 */ }
+    finally { this.reportingError = false }
+  }
 
   /** 供插桩模块回调总装的窄接口(朴素对象,方法各转发到对应命令式 API)。 */
   private makeCtx(): InstrumentCtx {
@@ -128,7 +138,7 @@ export class MooClient {
       lastCrumb: () => this.crumbs.last(),
       capture: (input, hint) => this.captureException(input, hint),
       flush: (useBeacon) => this.flush(useBeacon),
-      onError: (e) => this.opts.onError?.(e),
+      onError: (e) => this.reportError(e),
     }
   }
 
@@ -138,7 +148,7 @@ export class MooClient {
       const u = fn()
       if (u) this.uninstallers.push(u)
     } catch (e) {
-      this.opts.onError?.(e)
+      this.reportError(e)
     }
   }
 
@@ -150,7 +160,7 @@ export class MooClient {
     // 并 bind(window) 发出自检请求 —— 不再需要跨模块拿 origFetch。各模块 install 各自 try/catch,
     // releaseCheck 同步抛错也不连坐其余插桩。
     this.tryInstall(() => {
-      checkSourcemapRelease(this.opts, this.opts.onError)
+      checkSourcemapRelease(this.opts, (error) => this.reportError(error))
       return undefined
     })
     if (this.opts.autoCapture) this.tryInstall(() => installGlobalErrors(ctx))

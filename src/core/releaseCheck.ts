@@ -20,6 +20,7 @@ export function checkSourcemapRelease(opts: ResolvedOptions, onError?: (err: unk
     headers: { 'Content-Type': 'application/json' },
     body,
     credentials: 'omit',
+    redirect: 'error',
     mode: 'cors',
   })
     .then(async (res) => {

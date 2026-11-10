@@ -154,8 +154,9 @@ captureMessage('用户点了一个理论上不可达的按钮', 'warning')
 
 - **键盘绝不记内容**:只记 Enter/Escape 与「开始在某输入框打字」这件事,按键值 / 输入值 / 密码一概不采;输入控件的描述只用 name/placeholder/type。
 - **breadcrumbs 里的 fetch/XHR 是「轨迹」不是「上报」**:平时不单独发,只在真出错时随错误一起带上;只记 url/method/status,**不抓请求 / 响应体**。
-- **不发 cookie / 凭证**(`credentials: 'omit'`);token 放请求体。
-- **脱敏**:消息 / 堆栈 / 页面 URL / 轨迹里像密钥的内容(`token=…`、JWT、`Bearer …`)**在 SDK 出站前就打码**(密钥不离开浏览器);云端写入与读取时再各兜底一层。
+- **传输隔离**：token放请求体，上报及release自检设置`credentials: 'omit'`、`redirect: 'error'`。`flush(true)`使用fetch keepalive尽力发送；sendBeacon无法禁止重定向，已停止使用。
+- **脱敏**:消息 / 堆栈 / 页面 URL / 轨迹及tags/extra里像密钥的内容(`token=…`、JWT、`Bearer …`)**在 SDK 出站前就打码**(密钥不离开浏览器);云端写入与读取时再各兜底一层。
+- tags/extra采用有界不可变快照，不调用getter/toJSON；敏感键值和带转义引号的多词凭据整体清洗。beforeSend仍是最后改写闸口，新增字段由调用方保证安全。
 - **聚合而非逐条风暴**:同一错误按指纹合并、累加 `count`、批量发送。
 
 ## 上报数据形态

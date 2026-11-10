@@ -1,6 +1,6 @@
 import { debugIdForFile } from './debugIds'
 import { hash12 } from './hash'
-import { scrub } from './scrub'
+import { scrub, scrubMetadata } from './scrub'
 import { parseStack } from './stacktrace'
 import { parseUA } from './uaParse'
 import type { Breadcrumb, FrontendErrorRecord, MooUser, StackFrame } from './types'
@@ -146,6 +146,6 @@ export function normalize(input: unknown, ctx: NormalizeCtx): FrontendErrorRecor
           session_id: ctx.user.sessionId,
         }
       : undefined,
-    payload: Object.keys(payload).length ? payload : undefined,
+    payload: Object.keys(payload).length ? scrubMetadata(payload) as Record<string, unknown> : undefined,
   }
 }

@@ -11,3 +11,7 @@
 - Debug ID 注入在 `writeBundle` 后改写 JS，与较早阶段计算的 SRI integrity 不兼容；启用 SRI 时关闭 `injectDebugIds`。
 - 同一 release 的多个 Rollup output 若共用 `app`，后上传的 build set 会替换先上传的 maps；modern/legacy 或多应用输出必须使用不同 `app`。
 - 在 `transform`、`renderChunk` 或上传阶段清空特定模块/chunk 的 map，虽能显著缩小 map 文件，却不能稳定降低 Rollup sourcemap 构建峰值；Node 22 大型 host 交换顺序 A/B 出现反向波动。要降低峰值必须从模块图中拆分或移除大型预打包依赖，不能把 `include`、`sourceMode: 'position'` 或空映射策略宣传为堆内存优化。
+
+- 2026-11-10：sendBeacon无法配置禁止重定向，token在POST body时不能依靠跨域认证头规则阻止307/308重放；卸载改用redirect:error的fetch keepalive，仍受浏览器共享在途配额限制。
+- 2026-11-10：onError/onFail回调本身可能抛错或重入采集，必须在调用边界隔离；close后的晚到网络失败若回收队列，会复活定时器。429长等待应按服务端时间保持，并对JavaScript定时器分段调度。
+- 2026-11-10：tags/extra直接保存引用或先JSON.stringify再限制大小，会执行宿主getter/toJSON并让排队数据随外部变动；应按总节点预算读取数据属性、清洗并冻结。密钥不能只清洗message而漏掉metadata。

@@ -5,7 +5,7 @@ import { Queue } from '../src/core/queue'
 import type { FrontendErrorRecord } from '../src/core/types'
 
 /**
- * 第六轮审查(可靠投递)的退避语义回归 —— 429 把触发批还给调用方 + 卸载 beacon 豁免退避。
+ * 第六轮审查(可靠投递)的退避语义回归 —— 429 把触发批还给调用方 + 卸载 keepalive 豁免退避。
  * 退避是 transport 模块级状态:这两个用例都要求「进入时退避为假」,与 transport.test 里已有的 429 用例
  * 互斥(同一进程内谁先设退避,另一个就跑不成),故单列一个文件靠 vitest 的文件级隔离各自持有干净的退避态。
  */
@@ -51,17 +51,16 @@ describe('退避语义(设退避,须在文件最后)', () => {
     expect(onFail).toHaveBeenCalledWith([{ hash: 'a' }], 'rate_limited')
   })
 
-  it('退避中页面卸载:beacon 豁免退避发出缓冲(此前整缓冲随页面死掉)', () => {
+  it('退避中页面卸载:keepalive 豁免退避发出缓冲(此前整缓冲随页面死掉)', () => {
     // 上一用例已进入 120s 退避。
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+    const fetchMock = stubFetch(200)
     const q = new Queue(URL_, 'tok', 50, 20)
     q.add(rec('eeeeeeeeeeee'))
 
     expect(q.flush(false)).toBe(false) // 常态路径仍尊重退避
-    expect(beacon).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
 
-    expect(q.flush(true)).toBe(true) // 卸载路径:一次性 beacon 豁免
-    expect(beacon).toHaveBeenCalledOnce()
+    expect(q.flush(true)).toBe(true) // 卸载路径:一次性 keepalive 豁免
+    expect(fetchMock).toHaveBeenCalledWith(URL_, expect.objectContaining({ keepalive: true, redirect: 'error' }))
   })
 })

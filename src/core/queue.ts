@@ -55,6 +55,7 @@ function truncateRecord(r: FrontendErrorRecord): FrontendErrorRecord {
  */
 export class Queue {
   private buf: FrontendErrorRecord[] = []
+  private closed = false
   private timer: ReturnType<typeof setTimeout> | null = null
   private dropped = 0
   /** 已失败重试过一次的记录:二次失败即丢弃(计入 dropped),防无限回收循环。 */
@@ -69,6 +70,7 @@ export class Queue {
   ) {}
 
   add(record: FrontendErrorRecord): void {
+    if (this.closed) return
     // 同 hash 合并:累加 count;现场字段(breadcrumbs/page/user/context)整体取「最新一次发生」——
     // 云端 upsert 是 last-write-wins,若保留窗口内第一次的现场,长退避/积压后云端展示的
     // 轨迹和页面是几分钟前的旧现场,却盖着崭新的 last_seen。
@@ -108,28 +110,27 @@ export class Queue {
 
   /** 安排一次 flush(已有待触发定时器则不重复设);Node/SSR 下 unref,不拖住进程退出。 */
   private arm(delay: number): void {
-    if (this.timer) return
-    const t = setTimeout(() => this.flush(), delay)
+    if (this.closed || this.timer) return
+    const t = setTimeout(() => this.flush(), Math.min(delay, 2_147_483_647))
     ;(t as unknown as { unref?: () => void }).unref?.()
     this.timer = t
   }
 
   /**
-   * 发出队列里全部记录(按条数 + 字节双重分批)。useBeacon=true 用 sendBeacon(页面卸载)。
+   * 发出队列里全部记录(按条数 + 字节双重分批)。useBeacon=true 用 keepalive fetch(页面卸载)。
    * 返回是否全部已派发(退避中 → false)。
    */
   flush(useBeacon = false): boolean {
+    if (this.closed) return true
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
     }
     // 退避中:绝不动 buf,安排「退避结束后」再 flush。
     // 例外:页面卸载(useBeacon)豁免退避 —— 安排的重试定时器会随页面一起死,
-    // 不发这一枪整个缓冲就没了;一次性 beacon 不构成对云端的重试风暴。
+    // 不发这一枪整个缓冲就没了;一次性 keepalive 不构成对云端的重试风暴。
     if (inBackoff() && !useBeacon) {
-      const t = setTimeout(() => this.flush(), Math.max(1000, backoffRemaining() + 100))
-      ;(t as unknown as { unref?: () => void }).unref?.()
-      this.timer = t
+      this.arm(Math.max(1000, backoffRemaining() + 100))
       return false
     }
     // 积压丢弃回执:本轮真正发送前,把累计丢弃量经 onDrop 上抛(让宿主可感知,非静默)。
@@ -174,7 +175,7 @@ export class Queue {
       if (bytes(rec) > MAX_RECORD_BYTES) rec = truncateRecord(rec)
       const b = bytes(rec)
       // 两轮截断后仍超限(如 beforeSend 注入巨型字段):丢弃并计数 —— 发出去也会在
-      // 卸载路径被 beacon 的 64KB 上限静默吃掉,「可感知地丢」好过「装作发了」。
+      // 卸载路径被 keepalive 的 64KB 上限静默吃掉,「可感知地丢」好过「装作发了」。
       if (b > MAX_RECORD_BYTES) {
         this.dropped++
         continue
@@ -190,6 +191,7 @@ export class Queue {
 
   /** 派发后失败的回收:可重试原因(429/网络/5xx)回缓冲一次,二次失败或语义拒绝丢弃并计数。 */
   private recover(records: FrontendErrorRecord[], reason: SendFailReason): void {
+    if (this.closed) return // close 后的晚到网络失败不能复活队列和定时器。
     if (reason === 'rejected') {
       this.dropped += records.length // 413/422:重试也不会成功 → 丢弃,经 onDrop 可感知
       this.arm(this.flushInterval) // 安静页面也要让 onDrop 回执在下一轮 flush 响起来,别等下个 add()
@@ -214,5 +216,12 @@ export class Queue {
 
   size(): number {
     return this.buf.length
+  }
+
+  close(): void {
+    this.closed = true
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = null
+    this.buf = []
   }
 }
