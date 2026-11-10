@@ -25,7 +25,7 @@ order: 10
  ├─ 轨迹层:点击(带 Vue 组件名)· 键盘 · 路由 · 请求(fetch + XHR/axios;环形 30 条,出错时随错误带出)
  ├─ 归一层:任意抛掷物 → 标准记录(栈解析 / 脱敏 / 稳定指纹)
  ├─ 队列层:同指纹合并计数 → 字节分批 → 截断分级
- └─ 传输层:fetch(常态)/ sendBeacon(页面卸载),429 退避 + 失败回收
+ └─ 传输层:fetch(常态)/ fetch keepalive(页面卸载)，禁止重定向，429退避 + 失败回收
         │  POST {token, records[]}
         ▼
 moo-scaffold-cloud(自有云端)
@@ -55,11 +55,11 @@ moo-scaffold-cloud(自有云端)
 | `instrument/globalErrors.ts` | 全局 JS、未处理 Promise 与资源加载错误捕获 |
 | `instrument/domCrumbs.ts` / `historyCrumbs.ts` | 点击、键盘和 SPA 导航轨迹;维护对应安装/卸载生命周期 |
 | `instrument/httpCrumbs.ts` | fetch + XHR 插桩、请求轨迹、HTTP 错误捕获和失败请求发起帧 |
-| `instrument/flushOnHide.ts` | 页面隐藏或卸载时触发 beacon flush |
+| `instrument/flushOnHide.ts` | 页面隐藏或卸载时触发 keepalive flush |
 | `normalize.ts` | 任意抛掷物 → 标准上报记录;栈解析调度;稳定指纹(剥离构建 hash) |
 | `stacktrace.ts` | Chrome/Firefox/Safari/eval/native/无列号 六类栈格式解析 |
 | `queue.ts` | 内存批量队列:同指纹合并、UTF-8 真字节分批(≤56KB)、分级截断、失败回收 |
-| `transport.ts` | 发送通道:fetch / sendBeacon、429 Retry-After 退避、失败分类回调 |
+| `transport.ts` | 发送通道：fetch / keepalive、禁止重定向、429秒数/HTTP日期退避、失败分类回调 |
 | `scrub.ts` | 出站脱敏(token=/JWT/Bearer/敏感 key-value) |
 | `breadcrumbs.ts` | 行为轨迹环形队列(30 条,message 钳 300) |
 | `dom.ts` | 操作元素解析:就近交互祖先 + 可读描述 + Vue 业务组件名反查(跳过 UI 库组件),输入控件绝不取值 |
@@ -125,14 +125,14 @@ moo-scaffold-cloud(自有云端)
 | 批量与体积控制 | 条数 + UTF-8 真字节双重分批(≤56KB),避开浏览器发送通道的 64KB 静默丢弃 |
 | 分级截断 | 超大记录先丢附加数据、再丢轨迹/栈、仍超则丢弃并计数 —— 绝不静默 |
 | 限流退避 | 云端 429 时按 Retry-After 退避;被拒批次回收重试一次,语义拒绝(413/422)可感知地丢弃 |
-| 页面卸载兜底 | `sendBeacon` 发出残余队列(豁免退避 —— 此刻不发就没机会了) |
+| 页面卸载兜底 | `fetch keepalive`尽力发送残余队列（保留一次性退避豁免）；不使用无法禁止重定向的sendBeacon，不保证浏览器退出前完成 |
 | 降噪开关 | `sampleRate` 采样、`ignoreErrors` 噪音过滤、`beforeSend` 改写/拦截、`onError` 自身错误回执 |
 
 ### 6. 隐私与安全(默认安全,无需配置)
 
 | 功能点 | 介绍 |
 |---|---|
-| 出站脱敏 | 消息/堆栈/URL/轨迹中的 `token=`、JWT、`Bearer`、敏感 key-value 在**离开浏览器前**打码;云端写入/读取再各兜一层 |
+| 出站脱敏 | 消息/堆栈/URL/轨迹及tags/extra中的 `token=`、JWT、`Bearer`、敏感 key-value 在**离开浏览器前**打码;云端写入/读取再各兜一层 |
 | 输入内容零采集 | 键盘只记事件不记值;输入控件的描述只用 name/placeholder/type |
 | 凭证安全 | 不带 cookie(`credentials: omit`);token 走请求体、无自定义头(免 CORS 预检);浏览器 token 与上传 token 强制隔离 |
 
@@ -166,3 +166,11 @@ moo-scaffold-cloud(自有云端)
 
 - **moo-scaffold-cloud**(自有云端,同团队维护):错误工作台、聚合入库、sourcemap 还原、入站过滤、AI 辅助降噪、钉钉/企微/邮件告警。SDK 不可独立产生价值,立项范围默认含云端前端错误管道的持续维护。
 - 浏览器要求:现代浏览器(ES2020);构建插件要求 Node ≥18、Vite。Node 18/20/22/24 均纳入 CI 兼容矩阵;宿主可按仓库独立固定 Node 版本,无需随其他使用方统一升级。Node 16 不在当前构建插件支持范围内。
+
+## 跨 SDK 可靠性约束
+
+文本在65,536个UTF-16单元扫描预算内先脱敏再截断，超扫描预算整段占位；支持完整多词及转义引号凭据。tags/extra在设置和归一化时冻结为有界快照：128节点、4层、每容器16项、共享8192字符预算、单值1024字符、最终8KB JSON；不调用getter、toJSON或未知对象描述。beforeSend仍是最后改写/丢弃闸口，调用方负责自行新增字段的安全性。
+
+普通上报、卸载发送和release自检均使用`redirect: error`及`credentials: omit`。`flush(true)`保留签名，内部用keepalive fetch；无fetch时返回未派发。keepalive共享浏览器在途配额，卸载时多批投递仍属尽力而为。429接受秒数与HTTP日期，普通长等待不缩成一分钟；异常值最多十年，定时器分段等待，短响应不覆盖更长等待。
+
+诊断及失败回调抛错不会再次进入宿主或形成回调递归；close取消队列定时器并使晚到网络失败失效，不重新启动投递。跨SDK纯假数据见`test/fixtures/cross-sdk-redaction.json`，不将同输入测试等同于统一平台采集能力。

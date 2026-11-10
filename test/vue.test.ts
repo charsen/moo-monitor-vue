@@ -5,8 +5,9 @@ import { getClient } from '../src/core/client'
 import type { FrontendErrorRecord } from '../src/core/types'
 
 describe('MooMonitor (Vue plugin)', () => {
+  afterEach(() => { getClient()?.close(); vi.unstubAllGlobals() })
   beforeEach(() => {
-    Object.defineProperty(navigator, 'sendBeacon', { value: vi.fn(() => true), configurable: true })
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200 })))
   })
 
   it('install takes over app.config.errorHandler and captures through it', () => {
@@ -45,18 +46,18 @@ describe('MooMonitor (Vue plugin)', () => {
     expect(spy).toHaveBeenCalledOnce()
   })
 
-  it('flush() sends queued events via beacon', () => {
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+  it('flush() sends queued events via keepalive fetch', () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
 
     const app = createApp({ render: () => h('div') })
     app.use(MooMonitor, { endpoint: 'https://cloud.test/api/v1', token: 'tok12345' })
 
     const client = getClient()!
     client.captureException(new Error('manual report'))
-    client.flush(true) // beacon 路径(jsdom 无 fetch)
+    client.flush(true) // keepalive fetch 路径
 
-    expect(beacon).toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalled()
   })
 })
 

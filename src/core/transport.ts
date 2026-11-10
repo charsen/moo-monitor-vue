@@ -11,18 +11,26 @@ export function backoffRemaining(): number {
   return Math.max(0, backoffUntil - Date.now())
 }
 
-function setBackoff(retryAfterSeconds: number): void {
-  const secs = retryAfterSeconds > 0 && retryAfterSeconds < 3600 ? retryAfterSeconds : 60
-  backoffUntil = Date.now() + secs * 1000
+function setBackoff(raw: string | null | undefined): void {
+  const value = raw?.trim() ?? ''
+  let delay = 60_000
+  if (/^\d+$/.test(value)) {
+    delay = Math.min(Number(value), 315_576_000) * 1000
+  } else if (/^[A-Za-z]{3},\s/.test(value)) {
+    const date = Date.parse(value)
+    if (Number.isFinite(date)) delay = Math.min(315_576_000_000, Math.max(0, date - Date.now()))
+  }
+  // 并发请求的短等待不能覆盖另一个响应给出的长等待。
+  backoffUntil = Math.max(backoffUntil, Date.now() + delay)
 }
 
 /** 派发后失败的分类:rate_limited=429(已设退避)/ rejected=4xx 语义拒绝(重试无意义)/ network=网络错或 5xx。 */
 export type SendFailReason = 'rate_limited' | 'rejected' | 'network'
 
 export interface SendOpts {
-  /** 页面卸载:优先 sendBeacon(失败回退 fetch keepalive)。 */
+  /** 页面卸载提示，兼容原参数名；使用禁止重定向的 fetch keepalive。 */
   useBeacon?: boolean
-  /** 跳过退避检查 —— 卸载时的一次性 beacon 豁免(此刻不发就永远没机会了)。 */
+  /** 跳过退避检查 —— 卸载时的一次性发送豁免。 */
   force?: boolean
   /**
    * 失败回收:批已派发但被拒(429 / 4xx / 网络错)时回调,把记录还给调用方决定
@@ -35,48 +43,40 @@ export interface SendOpts {
  * 发送一批记录到云端。token 放 body,只带 Content-Type(云端 CORS 仅放行 Content-Type/Accept)。
  * - 常态周期:普通 fetch(不带 keepalive —— keepalive 的 64KB 是「全部在途请求共享」的配额,
  *   多批并发时第二批起会被整批静默丢;页面活着没必要用它)。
- * - 页面卸载(useBeacon):sendBeacon,失败回退 fetch keepalive。
+ * - 页面卸载(useBeacon):fetch keepalive。sendBeacon 无法禁止 307/308 携凭据转发，故不再使用。
  * 返回是否「已派发」(退避中或无可用通道 → false,此时记录仍在调用方手里)。
  */
 export function send(url: string, token: string, records: unknown[], opts: SendOpts = {}): boolean {
   if (!opts.force && inBackoff()) return false // 退避中:不打云端(调用方保留记录)
-  const body = JSON.stringify({ token, records })
-
-  if (opts.useBeacon) {
-    try {
-      if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-        const blob = new Blob([body], { type: 'application/json' })
-        if (navigator.sendBeacon(url, blob)) return true
-      }
-    } catch {
-      /* fall through to fetch */
-    }
+  const fail = (reason: SendFailReason) => {
+    try { opts.onFail?.(records, reason) } catch { /* 宿主回调失败不能形成第二次失败或未处理拒绝。 */ }
   }
 
   try {
+    const body = JSON.stringify({ token, records })
     if (typeof fetch === 'function') {
       void fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
-        keepalive: !!opts.useBeacon, // 仅卸载回退路径需要 keepalive
+        keepalive: !!opts.useBeacon, // 仅卸载路径需要 keepalive
         credentials: 'omit',
+        redirect: 'error',
         mode: 'cors',
       })
         .then((res) => {
           if (!res) return
           if (res.status === 429) {
-            const ra = Number(res.headers?.get?.('Retry-After'))
-            setBackoff(Number.isFinite(ra) ? ra : 60)
-            opts.onFail?.(records, 'rate_limited')
+            setBackoff(res.headers?.get?.('Retry-After'))
+            fail('rate_limited')
             return
           }
           if (!res.ok) {
             // 4xx(413 体积超限 / 422 格式拒绝):重试也不会成功;5xx:服务端瞬时问题,可重试。
-            opts.onFail?.(records, res.status >= 400 && res.status < 500 ? 'rejected' : 'network')
+            fail(res.status >= 400 && res.status < 500 ? 'rejected' : 'network')
           }
         })
-        .catch(() => opts.onFail?.(records, 'network'))
+        .catch(() => fail('network'))
       return true
     }
   } catch {

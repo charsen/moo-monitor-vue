@@ -33,7 +33,7 @@
 ## 队列与传输
 
 - 队列按 UTF-8 真实字节限制分批，超限时分级截断；同一 flush 内聚合，失败批按原顺序回收，不能因并发 flush、429 或半失败丢记录/重复风暴。
-- fetch 为常态通道，页面卸载使用 sendBeacon；429 遵循 Retry-After，失败分类和 retry 语义保持公开回调契约。
+- fetch 为常态通道，页面卸载使用禁止重定向的 fetch keepalive（保留 flush(true) 参数）；不使用无法禁止重定向的 sendBeacon。429 遵循 Retry-After 秒数/HTTP日期，失败分类和 retry 语义保持公开回调契约。
 - `autoBreadcrumbs` 与 `httpErrors` 是正交开关：关闭轨迹不应静默关闭 HTTP 错误捕获；要完全不 patch fetch/XHR 必须两者都关闭。
 - SSR/无 window 环境必须安全 no-op；不得因模块级单例扩大到未承诺的 per-request SSR 多实例能力。
 

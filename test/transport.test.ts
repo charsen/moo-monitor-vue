@@ -6,16 +6,18 @@ import type { FrontendErrorRecord } from '../src/core/types'
 const URL_ = 'https://cloud.test/api/v1/frontend-errors/intake'
 
 describe('transport.send', () => {
-  it('uses sendBeacon when useBeacon=true (页面卸载)', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('uses redirect protected keepalive fetch when useBeacon=true (页面卸载)', () => {
     const beacon = vi.fn(() => true)
     Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
 
     const ok = send(URL_, 'tok123', [{ hash: 'aaaaaaaaaaaa' }], { useBeacon: true })
 
     expect(ok).toBe(true)
-    expect(beacon).toHaveBeenCalledOnce()
-    expect(beacon.mock.calls[0][0]).toBe(URL_)
-    expect(beacon.mock.calls[0][1]).toBeInstanceOf(Blob)
+    expect(beacon).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledWith(URL_, expect.objectContaining({ keepalive: true, redirect: 'error' }))
   })
 
   it('uses fetch (readable) by default with only Content-Type header', () => {

@@ -34,22 +34,23 @@ beforeEach(() => {
 })
 afterEach(() => {
   clients.splice(0).forEach((c) => c.close()) // 防多实例监听器跨用例串 crumb
+  vi.unstubAllGlobals()
 })
 
 describe('MooClient auto-capture', () => {
   beforeEach(() => {
-    Object.defineProperty(navigator, 'sendBeacon', { value: vi.fn(() => true), configurable: true })
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, status: 200 })))
   })
 
-  it('captures global window error events and flushes via beacon', () => {
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+  it('captures global window error events and flushes via keepalive fetch', () => {
+    const fetchMock = vi.fn((_url: unknown, _init?: RequestInit) => Promise.resolve({ ok: true, status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
 
     const client = new MooClient(OPTS)
     window.dispatchEvent(new ErrorEvent('error', { error: new Error('global boom'), message: 'global boom' }))
-    client.flush(true) // 用 beacon 路径(jsdom 无 fetch)
+    client.flush(true) // 用 keepalive fetch 路径
 
-    expect(beacon).toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalled()
     client.close() // 合并进 client.test 后须 close,否则历史/补丁的 __mooPatched 哨兵残留污染后续用例
   })
 
@@ -69,8 +70,6 @@ describe('MooClient auto-capture', () => {
   })
 
   it('close() restores window.fetch and stops capturing (microfrontend / repeated init)', () => {
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
     const base = vi.fn(() => Promise.resolve({ ok: true, status: 200 }))
     // @ts-expect-error 测试注入 fetch
     window.fetch = base
@@ -81,33 +80,33 @@ describe('MooClient auto-capture', () => {
     client.close()
     expect(window.fetch).toBe(base) // 还原原始 fetch
 
-    beacon.mockClear()
+    base.mockClear()
     client.captureException(new Error('after close')) // 关闭后 enabled=false → 不入队
     client.flush(true)
-    expect(beacon).not.toHaveBeenCalled()
+    expect(base).not.toHaveBeenCalled()
   })
 
   it('flushes the queue on pagehide', () => {
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+    const fetchMock = vi.fn((_url: unknown, _init?: RequestInit) => Promise.resolve({ ok: true, status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
 
     const client = new MooClient(OPTS)
     client.captureException(new Error('queued before unload'))
     window.dispatchEvent(new Event('pagehide'))
 
-    expect(beacon).toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalled()
     client.close() // 同上:释放监听 + 还原补丁,避免污染后续用例
   })
 
   it('respects enabled=false (no capture)', () => {
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+    const fetchMock = vi.fn((_url: unknown, _init?: RequestInit) => Promise.resolve({ ok: true, status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
 
     const client = new MooClient({ ...OPTS, enabled: false })
     client.captureException(new Error('should be ignored'))
     client.flush()
 
-    expect(beacon).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('releaseCheck reports missing sourcemaps through onError only', async () => {
@@ -452,8 +451,8 @@ describe('选项钳制(footgun 防护)', () => {
 
 describe('beforeSend(补测试缺口)', () => {
   it('可改写记录;返回 null 丢弃', async () => {
-    const beacon = vi.fn(() => true)
-    Object.defineProperty(navigator, 'sendBeacon', { value: beacon, configurable: true })
+    const fetchMock = vi.fn((_url: unknown, _init?: RequestInit) => Promise.resolve({ ok: true, status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
 
     const client = new MooClient({
       endpoint: 'https://c.test/api/v1', token: 'tok12345',
@@ -469,13 +468,8 @@ describe('beforeSend(补测试缺口)', () => {
     client.captureException(new Error('drop-me'))
     client.flush(true)
 
-    expect(beacon).toHaveBeenCalledTimes(1)
-    // beacon body 是 Blob;jsdom 的 Blob 无 .text(),用 FileReader 读
-    const text = await new Promise<string>((resolve) => {
-      const fr = new FileReader()
-      fr.onload = () => resolve(String(fr.result))
-      fr.readAsText(beacon.mock.calls[0][1] as Blob)
-    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const text = fetchMock.mock.calls[0][1]?.body as string
     const body = JSON.parse(text)
     expect(body.records).toHaveLength(1) // drop-me 被丢弃
     expect(body.records[0].error.message).toBe('[改写] keep')
