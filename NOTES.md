@@ -16,3 +16,4 @@
 - 2026-11-10：onError/onFail回调本身可能抛错或重入采集，必须在调用边界隔离；close后的晚到网络失败若回收队列，会复活定时器。429长等待应按服务端时间保持，并对JavaScript定时器分段调度。
 - 2026-11-10：tags/extra直接保存引用或先JSON.stringify再限制大小，会执行宿主getter/toJSON并让排队数据随外部变动；应按总节点预算读取数据属性、清洗并冻结。密钥不能只清洗message而漏掉metadata。
 - 2026-11-10：待发队列上限不约束已派发请求，慢端点可把记录全部转为悬挂fetch；必须在序列化/派发前检查共享在途预算。超时仅取消实际请求，名额在fetch实际结束后释放，不能用Promise.race提前放名额；否则忽略取消的fetch仍会无界积压。未派发的多批记录统一按原顺序回插，不计作网络重试。
+- 2026-11-17：sourcemap 上传改直传七牛后 cloud 不再接收 `.map` 本体；每个 `.map` 单独 ticket→七牛→confirm，confirm 会回查对象大小/SHA-256。直传 confirm 当前不返回 health，`strict` 以逐文件 confirm 成功为强校验，服务端若返回 health 仍走原校验。同内容重传七牛会返回 `file exists`(614)，必须按成功处理再 confirm（同 key 即同 sha 前缀，内容一致）。

@@ -1,15 +1,22 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { copyFile, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Plugin } from 'vite'
+import {
+  computeBuildId,
+  SourcemapUploadError,
+  uploadSourcemapFile,
+  type SourcemapHealth,
+  type SourcemapSourceMode,
+} from './directUpload'
 
 const execFileAsync = promisify(execFile)
 
 /**
- * Vite 插件:构建结束后把产物里的 .map 上传到 Moo Scaffold Cloud,
- * 云端用它把前端错误的压缩堆栈还原成源码位置(.vue 文件即出错组件)。VIP 专享。
+ * Vite 插件:构建结束后把产物里的 .map 经「云端签票据 → 直传七牛 → confirm」上传,
+ * 云端再用它把前端错误的压缩堆栈还原成源码位置(.vue 文件即出错组件)。VIP 专享。
  *
  * 凭证安全:token 必须是单独生成的、只含「sourcemaps」能力的 CI token ——
  * 绝不能复用 SDK init 用的前端错误 token(那枚会出现在浏览器 JS 里,人人可见)。
@@ -48,9 +55,10 @@ export interface SourcemapUploadOptions {
   /** 源码安全模式:context=保留 sourcesContent 供云端展示源码上下文;position=剥掉源码,仅还原文件/行/列。默认 context。 */
   sourceMode?: 'context' | 'position'
   /**
-   * CI 强约束:上传后检查云端 health。true = 要求文件数齐、Debug ID 覆盖 100%、无重复 ID。
-   * 不受 failOnError 影响:健康不达标、上传中断、配置缺失、云端未返回 health(版本过旧)
-   * 都直接让构建失败 —— strict 的语义是「构建通过 = map 一定可用」,任何静默放行都是假保证。
+   * CI 强约束:每个文件都必须完成 ticket → 直传七牛 → confirm。true = 全部文件确认成功;
+   * 服务端 confirm 若附带 health,再校验文件数齐、Debug ID 覆盖 100%、无重复 ID。
+   * 不受 failOnError 影响:配置缺失、任一文件失败、health 不达标都直接让构建失败 ——
+   * strict 的语义是「构建通过 = map 一定可用」,任何静默放行都是假保证。
    */
   strict?: boolean | { requireAllFiles?: boolean; requireDebugIds?: boolean; allowDuplicateDebugIds?: boolean }
 }
@@ -100,12 +108,6 @@ export async function resolveMooRelease(options: MooReleaseOptions = {}): Promis
 
   return `${tag}-${commit}`
 }
-
-/** 单次请求最多文件数(与云端上限对齐,留余量;也勿超 PHP max_file_uploads 默认 20)。 */
-const MAX_FILES_PER_REQUEST = 20
-
-/** 单次请求累计字节上限:保守低于服务器 post_max_size 的常见默认(8M)。 */
-const MAX_REQUEST_BYTES = 6 * 1024 * 1024
 
 /** js 内容 sha256 → 确定性 uuid 形态的 debug id(同一构建产物永远同 ID,watch 重跑不漂移)。 */
 function deriveDebugId(jsContent: string): string {
@@ -242,12 +244,10 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
         if (stripped > 0) log(`已从 ${stripped} 个 sourcemap 剥离 sourcesContent(仅位置还原模式)。`)
       }
 
-      const url = opts.endpoint.replace(/\/+$/, '') + '/sourcemaps/intake'
       // 构建集标识(确定性):全部 map 文件名排序后哈希 —— Vite 产物名带内容 hash,
-      // 名单即构建内容。云端按它做「构建集替换」:同 release 重复构建时旧工件整组清掉
-      // (否则每次构建全部改名,旧 map 无限堆积、占满 release 配额);同一构建的分块/
-      // 断点补传/CI 重跑同内容则相安无事。
-      const buildId = createHash('sha256').update([...names].sort().join('\n')).digest('hex').slice(0, 32)
+      // 名单即构建内容。直传流按文件分别登记,每个 ticket 都必须带同一个 build_id,
+      // 服务端才能把同一次构建的工件归入一个构建集(用于整组替换/清理)。
+      const buildId = computeBuildId(names)
       // 多 output 互清构建集告警(P3.5,不改行为):同进程二次 writeBundle 且 buildId 不同 → 提示按 output 区分 app。
       if (firstBuildId === undefined) {
         firstBuildId = buildId
@@ -283,131 +283,86 @@ export function mooSourcemapUpload(opts: SourcemapUploadOptions): Plugin {
           fail(`归档 sourcemap 失败(${opts.archiveDir}):${e instanceof Error ? e.message : String(e)}。`)
         }
       }
-      // 分块同时受「条数 ≤20」与「累计 ≤6MB」约束:只按条数的话,20 个大 map 一个请求可达
-      // 数十 MB,超过服务器 post_max_size(常见默认 8M)时整个 POST 被 PHP 丢弃 ——
-      // Laravel 连 token 都读不到,报出来的是误导性的 401。
-      const sizes = new Map<string, number>()
-      for (const n of names) {
-        try {
-          sizes.set(n, (await stat(join(dir, n))).size)
-        } catch {
-          sizes.set(n, 0)
-        }
-      }
-      const chunks: string[][] = []
-      {
-        let cur: string[] = []
-        let curBytes = 0
-        for (const n of names) {
-          const sz = sizes.get(n) ?? 0
-          if (cur.length > 0 && (cur.length >= MAX_FILES_PER_REQUEST || curBytes + sz > MAX_REQUEST_BYTES)) {
-            chunks.push(cur)
-            cur = []
-            curBytes = 0
-          }
-          cur.push(n)
-          curBytes += sz
-        }
-        if (cur.length) chunks.push(cur)
-      }
+      // 直传契约:云端只签票据与核验,每个 .map 单独走「ticket → 七牛直传 → confirm」。
+      // 不再把文件打进 multipart POST:cloud 端不再接收 .map 本体,也绕开 PHP post_max_size。
       let uploaded = 0
-      let unchanged = 0
+      let reused = 0
       let fileErrors = 0
-      let sentFiles = 0
-      type IntakeHealth = {
-        current_build_artifacts?: number
-        missing_files?: number | null
-        debug_id_coverage?: number | null
-        duplicate_debug_ids?: number
-        ok?: boolean
-      }
-      let lastHealth: IntakeHealth | undefined
-      type IntakeBody = { saved?: number; skipped?: number; errors?: Record<string, string>; error?: string; message?: string; health?: IntakeHealth } | null
-      const postChunk = async (form: FormData) => {
-        const res = await fetch(url, { method: 'POST', body: form })
-        const body = (await res.json().catch(() => null)) as IntakeBody
-        return { res, body }
-      }
-      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-      // 中途失败时给出半传摘要:release 只传了一部分也是种状态,不能只留一句裸告警。
+      let lastHealth: SourcemapHealth | undefined
+      // 中途 fatal 时给出半传摘要:release 只传了一部分也是种状态,不能只留一句裸告警。
       const abort = (reason: string) => {
-        fail(`${reason}(已传 ${sentFiles}/${names.length} 个文件,release ${opts.release} 处于部分上传状态,重跑构建可补齐)`)
+        fail(`${reason}(已确认 ${uploaded}/${names.length} 个文件,release ${opts.release} 处于部分上传状态,重跑构建可补齐)`)
       }
 
-      for (const chunk of chunks) {
-        const form = new FormData()
-        form.append('token', opts.token)
-        form.append('release', opts.release)
-        form.append('build_id', buildId)
-        form.append('expected_files', String(names.length))
-        form.append('source_mode', opts.sourceMode ?? 'context')
-        if (opts.app) form.append('app', opts.app)
-        for (const name of chunk) {
-          const buf = await readFile(join(dir, name))
-          // 文件名只取 basename:云端用「去 .map 后的产物名」匹配错误栈帧里的文件
-          form.append('files[]', new Blob([buf], { type: 'application/json' }), basename(name))
-        }
-
-        let outcome: { res: Response; body: IntakeBody }
+      for (const name of names) {
+        const file = basename(name)
+        let bytes: Buffer
         try {
-          outcome = await postChunk(form)
-          if (outcome.res.status === 429) {
-            // 撞云端限流:等 2s 重试一次(CI 里多 chunk 连发偶发),再失败才放弃。
-            await sleep(2000)
-            outcome = await postChunk(form)
-          }
+          bytes = await readFile(join(dir, name))
         } catch (e) {
-          abort(`上传请求失败(网络/地址问题):${e instanceof Error ? e.message : String(e)}`)
+          abort(`读取 sourcemap 失败(${file}):${e instanceof Error ? e.message : String(e)}`)
           return
         }
-        const { res, body } = outcome
-        // Laravel 框架级错误(429 限流/异常页)的提示在 message 字段,业务错误在 error 字段 —— 都认。
-        const errText = body?.error || body?.message
 
-        if (res.status === 403 && body?.error === 'vip_required') {
-          fail('sourcemap 还原为 VIP 功能 —— 请项目拥有者开通会员后再传(本次构建不受影响)。')
+        try {
+          const result = await uploadSourcemapFile(
+            { endpoint: opts.endpoint, token: opts.token },
+            {
+              release: opts.release,
+              app: opts.app,
+              buildId,
+              sourceMode: (opts.sourceMode ?? 'context') as SourcemapSourceMode,
+            },
+            file,
+            bytes,
+          )
+          uploaded++
+          if (result.reusedObject) reused++
+          if (result.health) lastHealth = result.health
+        } catch (e) {
+          const err =
+            e instanceof SourcemapUploadError
+              ? e
+              : new SourcemapUploadError(e instanceof Error ? e.message : String(e), 'fatal')
+          // 单文件被云端拒绝(如 confirm 复核大小/SHA 不一致):继续传其余文件,最后按策略决定是否失败。
+          if (err.kind === 'rejected') {
+            fileErrors++
+            warn(`${file}: ${err.message}`)
+            continue
+          }
+          if (/vip_required/.test(err.message)) {
+            fail('sourcemap 还原为 VIP 功能 —— 请项目拥有者开通会员后再传(本次构建不受影响)。')
+            return
+          }
+          abort(`上传失败(${file}):${err.message}`)
           return
-        }
-        if (res.status === 413) {
-          abort('上传失败:HTTP 413(请求体超过服务器上传限制)—— 请将服务端 PHP 的 post_max_size / upload_max_filesize 调到 ≥20M')
-          return
-        }
-        if (!res.ok) {
-          abort(`上传失败:HTTP ${res.status}${errText ? ` — ${errText}` : ''}`)
-          return
-        }
-        sentFiles += chunk.length
-        uploaded += body?.saved ?? 0
-        unchanged += body?.skipped ?? 0
-        lastHealth = body?.health
-        for (const [file, reason] of Object.entries(body?.errors ?? {})) {
-          fileErrors++
-          warn(`${file}: ${reason}`)
         }
       }
 
-      if (opts.strict && !lastHealth) {
-        // 云端版本过旧(响应无 health 字段)时静默放行 = CI 以为有保护、实际没有。
-        throw new Error('[moo-sourcemap] strict 已开启但云端未返回 health(云端版本过旧或响应异常),无法验证上传结果 —— 请升级云端,或暂时关闭 strict。')
-      }
-      if (opts.strict && lastHealth) {
+      if (opts.strict) {
         const strict = opts.strict === true ? {} : opts.strict
         const requireAllFiles = strict?.requireAllFiles ?? true
         const requireDebugIds = strict?.requireDebugIds ?? true
         const allowDuplicateDebugIds = strict?.allowDuplicateDebugIds ?? false
         const failures: string[] = []
-        if (requireAllFiles && (lastHealth.missing_files ?? 0) > 0) failures.push(`缺少 ${lastHealth.missing_files} 个文件`)
-        if (requireAllFiles && (lastHealth.current_build_artifacts ?? 0) < names.length) failures.push(`云端当前构建只有 ${lastHealth.current_build_artifacts ?? 0}/${names.length} 个文件`)
-        if (requireDebugIds && lastHealth.debug_id_coverage !== 1) failures.push(`Debug ID 覆盖率 ${Math.round((lastHealth.debug_id_coverage ?? 0) * 100)}%`)
-        if (!allowDuplicateDebugIds && (lastHealth.duplicate_debug_ids ?? 0) > 0) failures.push(`重复 Debug ID ${lastHealth.duplicate_debug_ids} 个`)
-        if (uploaded + unchanged + fileErrors !== names.length) failures.push(`上传回执数量不一致:${uploaded}+${unchanged}+${fileErrors}/${names.length}`)
+        // 直传流程每个文件都有独立 confirm 回执(云端已回查七牛对象大小/SHA);数量不齐即失败。
+        if (uploaded + fileErrors !== names.length) failures.push(`文件回执数量不一致:${uploaded}+${fileErrors}/${names.length}`)
+        if (requireAllFiles && uploaded < names.length) failures.push(`仅 ${uploaded}/${names.length} 个文件直传并确认成功`)
+        // 新直传契约的 confirm 不强制返回 health;服务端若返回则沿用原有 health 校验语义,
+        // 不返回时以逐文件 confirm 作为「map 可用」的强校验(不再因缺少 health 直接判失败)。
+        if (lastHealth) {
+          if (requireAllFiles && (lastHealth.missing_files ?? 0) > 0) failures.push(`缺少 ${lastHealth.missing_files} 个文件`)
+          if (requireAllFiles && (lastHealth.current_build_artifacts ?? 0) < names.length) failures.push(`云端当前构建只有 ${lastHealth.current_build_artifacts ?? 0}/${names.length} 个文件`)
+          if (requireDebugIds && lastHealth.debug_id_coverage !== 1) failures.push(`Debug ID 覆盖率 ${Math.round((lastHealth.debug_id_coverage ?? 0) * 100)}%`)
+          if (!allowDuplicateDebugIds && (lastHealth.duplicate_debug_ids ?? 0) > 0) failures.push(`重复 Debug ID ${lastHealth.duplicate_debug_ids} 个`)
+        }
         if (failures.length) {
           throw new Error(`[moo-sourcemap] sourcemap strict check failed:${failures.join('; ')}`)
         }
       }
 
       log(
-        `已上传 ${uploaded} 个 sourcemap(release ${opts.release}${unchanged ? `,${unchanged} 个未变更跳过` : ''})。` +
+        `已上传 ${uploaded} 个 sourcemap(release ${opts.release}${reused ? `,${reused} 个已存在对象复用` : ''})。` +
           (uploaded > 0 ? '云端还原约 2 分钟后生效(防抖收尾 + 队列消费),刚上报的错误稍后刷新即可看到源码位置。' : ''),
       )
       if (fileErrors > 0 && opts.failOnError) {
