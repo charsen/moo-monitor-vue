@@ -12,6 +12,14 @@ describe('scrub', () => {
     expect(scrub('eyJhbGciOi.eyJzdWIiOi.SflKxwRJ')).toBe('***JWT***')
   })
 
+  it('masks Basic/Digest authorization credentials completely', () => {
+    const basic = scrub('Authorization: Basic dXNlcjpwYXNzd29yZA==')
+    expect(basic).not.toContain('dXNlcjpwYXNzd29yZA==')
+    expect(basic).toContain('Authorization: ***')
+    const digest = scrub('authorization=Digest dXNlcjpwYXNzd29yZA==')
+    expect(digest).not.toContain('dXNlcjpwYXNzd29yZA==')
+  })
+
   it('leaves non-secret text untouched + passes through empty/undefined', () => {
     expect(scrub('GET /api/users?page=2 200')).toBe('GET /api/users?page=2 200')
     expect(scrub(undefined)).toBeUndefined()

@@ -10,7 +10,7 @@ const PATTERNS: Array<[RegExp, string]> = [
 ]
 
 // 带前缀的键及完整引号值（含转义引号）；与移动端及后端共用假数据回归。
-const KEY_VALUE = /\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|jwt|authorization|cookie)[\w.-]*\s*["']?\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|[^\s"',&;]+)/gi
+const KEY_VALUE = /\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|jwt|authorization|cookie)[\w.-]*\s*["']?\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|(?:Basic|Digest)\s+[A-Za-z0-9+/=]+|[^\s"',&;]+)/gi
 
 export function scrub<T extends string | undefined>(v: T): T {
   if (!v) return v
