@@ -40,7 +40,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "moo-monitor-release": "./bin/moo-monitor-release.mjs"
+    "moo-monitor-release": "./bin/moo-monitor-release.mjs",
+    "moo-monitor-sourcemap": "./bin/moo-monitor-sourcemap.mjs"
   },
   "sideEffects": false,
   "files": [

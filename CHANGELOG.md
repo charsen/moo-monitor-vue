@@ -1,5 +1,17 @@
 # Changelog
 
+## 未发布
+
+sourcemap 上传改为**云端签票据 + 直传七牛 + confirm**(对齐 moo-scaffold-cloud `/api/v1/uploads` 契约):
+
+- Vite 插件不再 multipart 直发 cloud;每个 `.map` 单独 `POST /uploads/tickets` → 直传七牛 → `POST /uploads/{upload_id}/confirm`,
+  文件字节不经过云端,绕开 PHP `upload_max_filesize`/`post_max_size` 与请求体积限制。
+- 新增 `moo-monitor-sourcemap` 手动/CI 上传脚本(逐个 `.map` 走同一契约;支持 `--dir` / `--include` / `--app` /
+  `--source-mode` / `--delete-after-upload` / `--strict`)。
+- `strict` 改为要求每个文件 ticket/直传/confirm 全部成功;服务端 confirm 若附带 `health`,仍沿用文件数 / Debug ID 覆盖 / 重复 ID 校验。
+- 保留 release 分组、Debug ID 注入、`sourceMode`、`archiveDir`、`deleteAfterUpload`、多 output/build_id 告警语义。
+- README 与 `docs/sourcemaps.md` 更新直传契约、七牛区域域名、限流与排查。
+
 ## 0.3.15
 
 2026-08-29：统一根目录协作文档命名为 `NOTES.md` 与 `TODOS.md`；无 SDK 运行时接口变化。

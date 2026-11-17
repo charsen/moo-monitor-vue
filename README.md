@@ -9,7 +9,7 @@
 - **多来源错误捕获**:`window.onerror`(带 `error.stack`)、未处理 Promise(`unhandledrejection`)、**Vue `app.config.errorHandler`**、资源加载失败、Router 动态 import 失败、fetch/XHR HTTP 错误和手动上报。
 - **行为轨迹 breadcrumbs**:点击(解析到就近交互元素 + 可读文本)、键盘关键节点(Enter/Escape + 「开始输入」聚合,**绝不记输入内容**)、SPA 路由跳转(`from → to`)及 fetch/XHR(含 axios)请求 —— 自动串成「报错前用户做了什么」的操作链路;另自动生成**会话 ID**(影响会话数可统计)。
 - **上下文**:`release`(版本及 sourcemap 回退匹配键)、`env`、用户(`setUser`)、浏览器/系统(UA 解析)、自定义 `tags`/`extra`。
-- **sourcemap 还原(VIP)**:配套 Vite 插件构建后自动上传 `.map`,云端把压缩堆栈还原成源码位置(`.vue` 文件即出错组件),见 [sourcemap 还原](#sourcemap-还原vip)。
+- **sourcemap 还原(VIP)**:配套 Vite 插件构建后经云端签票据、把 `.map` 直传七牛并确认(字节不经过云端),云端再把压缩堆栈还原成源码位置(`.vue` 文件即出错组件),见 [sourcemap 还原](#sourcemap-还原vip)。
 - **可靠上报**:客户端按指纹**合并计数**、`sampleRate` 采样、`ignoreErrors` 过滤、UTF-8 字节分批；待发记录最多 200 条，在途上报最多 4 批，支持 `AbortController` 时 15 秒取消等待。页面卸载(`pagehide`/`visibilitychange`)用禁止重定向的 `fetch keepalive` 尽力发送。
 - **分层**:框架无关 `core` + 薄 Vue 适配层 —— `core` 可单独用于任意 JS 项目。
 
@@ -24,7 +24,7 @@ npm i moo-monitor-vue
 ### 运行环境兼容性
 
 - `moo-monitor-vue` 与 `moo-monitor-vue/vue` 是浏览器运行时入口，面向 ES2020 现代浏览器，不要求业务项目统一使用某个 Node.js 大版本。
-- `moo-monitor-vue/vite` 与 `moo-monitor-release` 在构建期运行，支持 Node.js 18、20、22、24；仓库 CI 会分别执行类型检查、代码检查、测试和构建。
+- `moo-monitor-vue/vite`、`moo-monitor-release` 与 `moo-monitor-sourcemap` 在构建期/CI 运行，支持 Node.js 18、20、22、24；仓库 CI 会分别执行类型检查、代码检查、测试和构建。
 - Node.js 16 不属于当前版本的支持范围。仍使用 Node.js 16 的旧项目应先升级构建运行时，或固定在已经自行验证过的旧版 SDK；不要仅因浏览器入口可加载就假定 Vite 插件也兼容。
 - 建议每个宿主仓库用 `.nvmrc`、`.node-version` 或同类工具独立固定构建版本；某个大型项目选择 Node.js 24，不会改变本包及其他宿主的最低版本。
 
@@ -250,10 +250,12 @@ declare const __MOO_RELEASE__: string
 ```
 
 插件选项:`include`(默认 `/\.js\.map$/`)、`sourceMode`(`context` 保留源码上下文,`position` 只还原位置)、
-`strict`(CI 强约束:文件齐、Debug ID 覆盖、重复 ID 检查)、`archiveDir`(可选,按 `release/app` 目录归档 map)、
+`strict`(CI 强约束:每个文件都必须 ticket→直传→confirm 成功;服务端若在 confirm 回执里返回 `health`,再校验文件齐、Debug ID 覆盖、重复 ID)、
+`archiveDir`(可选,按 `release/app` 目录归档 map)、
 `deleteAfterUpload`(默认 `false`,生产建议 `true`)、
 `failOnError`(默认 `false`:未启用 `strict` 时上传失败只告警不挡构建)、`injectDebugIds`(默认 `true`,见下)、`silent`。
-启用 `strict` 后,配置缺失、上传中断、云端无 health 或健康检查不达标都会直接让构建失败,不受 `failOnError: false` 影响。
+启用 `strict` 后,配置缺失、上传中断、任一文件直传/确认失败、或服务端返回的 health 不达标都会直接让构建失败,不受 `failOnError: false` 影响。
+**map 文件字节不经过云端**:插件为每个 `.map` 单独调 `POST /api/v1/uploads/tickets` 取七牛上传票据,再直传七牛(`upload.qiniup.com` 或区域域名),最后 `POST /api/v1/uploads/{upload_id}/confirm` 让云端回查对象大小/SHA-256。
 
 **Debug ID(v0.3.7+,默认开启)**:插件给每个 bundle 注入唯一 ID(写进产物与 map),错误帧
 携带 ID 上报,云端**优先按 ID 匹配** —— 产物与 map 内容级强绑定,与 release / 文件名 / 部署路径
@@ -271,17 +273,41 @@ declare const __MOO_RELEASE__: string
 注册 snippet),而 `vite-plugin-sri` 等在 `generateBundle` 阶段就已算好各 chunk 的 `integrity` 哈希 —— JS 被改写后
 哈希对不上,浏览器会**拒载全部 chunk**。二者互斥:要用 SRI 请设 `injectDebugIds: false`(退回 release + 文件名匹配)。
 
-**4)或裸 API**(非 Vite 项目,CI 里 curl):
+**4)手动 / CI 直传脚本**(非 Vite 项目、补传或独立 CI 步骤):
 
 ```bash
-curl -X POST https://cloud.example.com/api/v1/sourcemaps/intake \
-  -F "token=$MOO_SOURCEMAP_TOKEN" -F "release=$APP_VERSION" \
-  -F "files[]=@dist/assets/index-abc123.js.map"
+# 需要先在 SDK 仓 npm run build(脚本从 dist/vite.js 取同一份直传实现)
+npx moo-monitor-sourcemap \
+  --endpoint https://cloud.example.com/api/v1 \
+  --token "$MOO_SOURCEMAP_TOKEN" \
+  --release "$APP_VERSION" \
+  --dir dist --include '\.js\.map$' --strict
+```
+
+脚本逐个 `.map` 走「票据 → 直传七牛 → confirm」,默认扫描 `dist` 下 `.js.map`;
+`--source-mode position` 会先剥离 `sourcesContent`,`--app` 用于 monorepo 分桶,
+`--delete-after-upload` 在全部成功后删除本地 map。
+
+**或裸 API**(任意语言实现同一契约,每个 `.map` 单独一组):
+
+```bash
+# 1) 签票据(cloud 只登记元信息)
+curl -X POST "$ENDPOINT/uploads/tickets" \
+  -H "Authorization: Bearer $MOO_SOURCEMAP_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"business":"sourcemaps","release":"'"$APP_VERSION"'","original_name":"index-abc123.js.map","file_size":12345,"sha256":"<64位hex>"}'
+# → {upload_id,key,region,token}
+
+# 2) 直传七牛(z0 用 upload.qiniup.com;z1/z2/na0/as0 用 upload-<region>.qiniup.com)
+curl -X POST https://upload.qiniup.com -F "token=$QINIU_TOKEN" -F "key=$KEY" -F "file=@dist/assets/index-abc123.js.map"
+
+# 3) 确认(云端回查七牛对象大小/SHA-256)
+curl -X POST "$ENDPOINT/uploads/$UPLOAD_ID/confirm" \
+  -H "Authorization: Bearer $MOO_SOURCEMAP_TOKEN" -H 'Content-Type: application/json' -d '{}'
 ```
 
 要点:用插件 + SDK ≥0.3.7 时按 Debug ID 自动匹配(release 仅作展示);老接入按「release + 产物文件 basename」匹配,需**三处一致**;
 云端默认保留最近 15 天 / 5 个 release(单文件 ≤ 20MB、单 release ≤ 50MB);错误先到、map 后上传也行,
-云端会对该 release 重新还原。已传的 map 在 `/app → 设置 → Sourcemap` 查看 / 删除。
+云端会对该 release 重新还原。直传按文件计数,大 monorepo 若撞 token 级限流(默认 120 次/分钟),可调云端 `INTAKE_RATE_LIMIT_PER_MIN`。已传的 map 在 `/app → 设置 → Sourcemap` 查看 / 删除。
 详细排查见 **[docs/sourcemaps.md](docs/sourcemaps.md)**；升级到 0.3.13 的接入步骤与验收清单见 **[docs/upgrade-0.3.13.md](docs/upgrade-0.3.13.md)**。
 
 ## 开发
